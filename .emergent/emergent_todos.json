@@ -24,24 +24,24 @@
     "status": "completed"
   },
   {
-    "content": "Phase 1: Create & run POC test script - fix until stable",
+    "content": "Phase 1: Create & run POC test script - fix until stable (52/52 PASSED)",
     "status": "completed"
   },
   {
     "content": "Phase 2: Design Agent call for UI/UX guidelines",
-    "status": "in_progress"
+    "status": "completed"
   },
   {
     "content": "Phase 2: Install dependencies + Full App Development (Backend + Frontend)",
-    "status": "pending"
+    "status": "completed"
   },
   {
     "content": "Phase 2: All user stories covered in Development",
-    "status": "pending"
+    "status": "completed"
   },
   {
     "content": "Phase 2: End-to-end testing with Testing Agent",
-    "status": "pending"
+    "status": "in_progress"
   },
   {
     "content": "Phase 3: RBAC, Security, KVKK Compliance",
