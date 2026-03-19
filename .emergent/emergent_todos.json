@@ -1,30 +1,6 @@
 [
   {
-    "content": "Phase 1: Implement core backend models (Guest, CheckIn, Submission, Attempt, AuditEvent, AgentState)",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 1: Implement TC Kimlik + Passport validators",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 1: Implement Mongo-backed queue with leasing/lock",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 1: Implement simulated KBS SOAP/XML service",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 1: Implement Agent runtime (background worker, heartbeat, retry engine)",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 1: Implement state machine + audit trail",
-    "status": "completed"
-  },
-  {
-    "content": "Phase 1: Create & run POC test script - fix until stable (52/52 PASSED)",
+    "content": "Phase 1: Core Flow POC (52/52 tests passed)",
     "status": "completed"
   },
   {
@@ -32,7 +8,7 @@
     "status": "completed"
   },
   {
-    "content": "Phase 2: Install dependencies + Full App Development (Backend + Frontend)",
+    "content": "Phase 2: Full App Development (Backend + Frontend)",
     "status": "completed"
   },
   {
@@ -40,8 +16,8 @@
     "status": "completed"
   },
   {
-    "content": "Phase 2: End-to-end testing with Testing Agent",
-    "status": "in_progress"
+    "content": "Phase 2: End-to-end testing with Testing Agent (Backend 100%, Frontend 75%)",
+    "status": "completed"
   },
   {
     "content": "Phase 3: RBAC, Security, KVKK Compliance",

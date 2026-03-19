@@ -105,7 +105,8 @@ export function DashboardShell({ children }) {
                         <NavLink
                           key={item.path}
                           to={item.path}
-                          data-testid={`nav-${item.path.replace('/', '') || 'dashboard'}`}
+                          data-testid={`nav-${item.path.replace(/\//g, '').replace(/-/g, '') || 'dashboard'}`}
+                          data-nav-path={item.path}
                           onClick={() => setSidebarOpen(false)}
                           className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-200 ${
                             isActive
