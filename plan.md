@@ -253,6 +253,8 @@
   - ✅ **Login + RBAC + tenant onboarding** implemented.
   - ✅ **No in-app e‑Devlet password**; only official redirect + per-hotel service credential configuration.
   - ✅ Health panel and user management implemented.
-- ⏭️ Phase 4:
-  - Observability enables diagnosing failures without DB access.
-  - Deployment and checklists ready for go-live.
+- ✅ Phase 4 completed:
+  - ✅ Observability enables diagnosing failures without DB access.
+  - ✅ Per-hotel go-live checklist (10-point readiness verification).
+  - ✅ KVKK compliance hardening (PII masking, retention, export/delete).
+  - ✅ Deployment guide and architecture documentation.
