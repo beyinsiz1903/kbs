@@ -69,6 +69,33 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+class AuthorityRegion(str, Enum):
+    EGM = "egm"
+    JANDARMA = "jandarma"
+    HYBRID = "hybrid"
+
+
+class IntegrationType(str, Enum):
+    EGM_KBS = "egm_kbs"
+    JANDARMA_KBS = "jandarma_kbs"
+
+
+class OnboardingStatus(str, Enum):
+    NOT_STARTED = "not_started"
+    IN_PROGRESS = "in_progress"
+    CREDENTIALS_PENDING = "credentials_pending"
+    TESTING = "testing"
+    ACTIVE = "active"
+    BLOCKED = "blocked"
+
+
+class AuthMethodType(str, Enum):
+    USERNAME_PASSWORD = "username_password"
+    CERTIFICATE = "certificate"
+    API_TOKEN = "api_token"
+    WEB_SERVICE = "web_service"
+
+
 class Hotel(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -87,6 +114,47 @@ class Hotel(BaseModel):
         "queue_poll_interval": 5
     })
     is_active: bool = True
+    # Onboarding fields
+    authority_region: Optional[str] = None  # egm / jandarma / hybrid
+    integration_type: Optional[str] = None  # egm_kbs / jandarma_kbs
+    onboarding_status: str = "not_started"
+    onboarding_step: int = 0
+    authorized_contact_name: Optional[str] = None
+    authorized_contact_phone: Optional[str] = None
+    authorized_contact_email: Optional[str] = None
+    static_ip: Optional[str] = None
+    district: Optional[str] = None  # ilce
+    # Timestamps
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class KbsIntegrationConfig(BaseModel):
+    """Per-hotel KBS integration credentials (NOT e-Devlet passwords)."""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    hotel_id: str
+    # Service credentials (officially issued)
+    kbs_username: Optional[str] = None
+    facility_code: Optional[str] = None
+    service_username: Optional[str] = None
+    # Encrypted fields (stored encrypted at rest)
+    encrypted_secret: Optional[str] = None  # password/token - encrypted
+    # Certificate info
+    certificate_subject: Optional[str] = None  # CN from cert, not the cert itself
+    certificate_expiry: Optional[str] = None
+    has_certificate: bool = False
+    # Connection info
+    endpoint_url: Optional[str] = None
+    environment: str = "test"  # test / production
+    whitelisted_ips: List[str] = Field(default_factory=list)
+    auth_method: str = "username_password"
+    # Status
+    last_connection_test: Optional[str] = None
+    last_connection_success: Optional[bool] = None
+    last_connection_error: Optional[str] = None
+    last_successful_submission: Optional[str] = None
+    # Timestamps
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -264,6 +332,42 @@ class HotelCreate(BaseModel):
     city: str
     address: str
     kbs_institution_code: str = ""
+    district: Optional[str] = None
+    authority_region: Optional[str] = None
+    integration_type: Optional[str] = None
+    authorized_contact_name: Optional[str] = None
+    authorized_contact_phone: Optional[str] = None
+    authorized_contact_email: Optional[str] = None
+    static_ip: Optional[str] = None
+
+
+class HotelOnboardingUpdate(BaseModel):
+    """Update hotel onboarding step data."""
+    authority_region: Optional[str] = None
+    integration_type: Optional[str] = None
+    onboarding_step: Optional[int] = None
+    onboarding_status: Optional[str] = None
+    authorized_contact_name: Optional[str] = None
+    authorized_contact_phone: Optional[str] = None
+    authorized_contact_email: Optional[str] = None
+    static_ip: Optional[str] = None
+    district: Optional[str] = None
+    kbs_institution_code: Optional[str] = None
+
+
+class KbsConfigUpdate(BaseModel):
+    """Update KBS integration credentials for a hotel."""
+    kbs_username: Optional[str] = None
+    facility_code: Optional[str] = None
+    service_username: Optional[str] = None
+    secret: Optional[str] = None  # Will be encrypted before storage
+    certificate_subject: Optional[str] = None
+    certificate_expiry: Optional[str] = None
+    has_certificate: Optional[bool] = None
+    endpoint_url: Optional[str] = None
+    environment: Optional[str] = None
+    whitelisted_ips: Optional[List[str]] = None
+    auth_method: Optional[str] = None
 
 
 class SubmissionCorrection(BaseModel):

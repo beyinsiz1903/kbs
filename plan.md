@@ -3,9 +3,13 @@
 ## 1) Objectives
 - ✅ **Completed**: Prove the **core pipeline** works end-to-end with realistic failure modes: **Check-in → Validation (TC/Passport) → Queue → Simulated Agent → Simulated KBS SOAP/XML → Ack/Fail → Retry/Quarantine → Audit**.
 - ✅ **Delivered (v1 core app)**: Cloud management panel + simulated local bridge agent runtime + operator monitoring UI.
-- 🟡 **In progress (Phase 2 hardening)**: Fix minor frontend UX/testability issues (navigation targeting, hotel dropdown targeting) to reach “demo-polished” level.
-- ⏭️ **Next**: Move to **Phase 3**: RBAC (Admin/Hotel Manager/Front Desk), security hardening, KVKK compliance controls.
+- 🟡 **In progress (Phase 2 hardening)**: Fix minor frontend UX/testability issues (navigation targeting, Check-in hotel Select stability) to reach “demo-polished” level.
+- ⏭️ **Next (Phase 3 — Productization for real hotels)**: Implement **hotel-based tenant onboarding + RBAC login + KBS integration setup**.
+  - **Explicit constraint**: **Do NOT collect e-Devlet passwords in-app.**
+  - Support both operational models via onboarding: **EGM KBS** (portal credentials) and **Jandarma KBS** (e-Devlet access / official flow + potential web-service credentials).
 - ⏭️ Later: Observability upgrades + deployment model + production checklists.
+
+---
 
 ## 2) Implementation Steps (Phased)
 
@@ -43,7 +47,7 @@
 ### Phase 2 — V1 App Development (MVP around proven core)
 **Status: 🟡 NEARLY COMPLETE**
 - Backend: ✅ 100% functional (testing agent: 21/21 API tests passed)
-- Frontend: 🟡 ~75% (core flows work; minor UX/testability issues found)
+- Frontend: 🟡 ~75–90% (core flows work; a few UX/testability items remain)
 
 **User stories (delivered)**
 1. ✅ Front Desk Operator can check-in a guest (TC or Passport) and see submission status.
@@ -78,9 +82,14 @@
   - Frontend: core scenarios pass; minor UI targeting issues.
 
 **Known issues to fix (Phase 2 polish)**
-1. 🟡 Navigation targeting in Turkish UI (timeouts when selecting some TR labels) → add/standardize `data-testid`/attributes for nav links.
-2. 🟡 Hotel dropdown targeting inconsistency on Check-in page → ensure stable `data-testid` on trigger + list items; verify Select portal behavior.
-3. 🟢 Language toggle minor: brand text not translated (acceptable for v1) → optional.
+1. 🟡 Navigation targeting in Turkish UI (timeouts when selecting some TR labels)
+   - Current state: `data-testid` exists on nav links; needs verification with E2E selectors.
+   - Fix: ensure stable selectors for sidebar items across TR/EN and mobile/desktop.
+2. 🟡 Check-in Hotel Select stability
+   - Fix: add stable `data-testid` for `SelectItem` options (e.g., `checkin-hotel-option-<hotelId>`), and ensure selection can be reliably automated.
+3. 🟡 CheckInForm guest type switch (TC/Pasaport) potential race condition
+   - Fix: ensure tab switch resets irrelevant fields deterministically; avoid stale required validation on hidden inputs.
+4. 🟢 Language toggle minor: brand text not translated (acceptable for v1) → optional.
 
 **Revised Phase 2 exit criteria**
 - All demo flows are stable *and* UI is testable/reliable:
@@ -89,35 +98,123 @@
   - ✅ TC + Passport validation
   - ✅ Agent offline/online affects processing
   - ✅ Audit trail visible
-  - 🟡 Fix remaining UI targeting issues (navigation + hotel select)
+  - 🟡 Fix remaining UI targeting issues (nav + hotel select) and eliminate Check-in tab/validation flakiness
 
 ---
 
-### Phase 3 — Security, RBAC, Compliance Hardening + Better Ops UX
-**Status: ⏭️ NEXT**
+### Phase 3 — Tenant Onboarding + RBAC + KBS Integration Setup (No in-app e‑Devlet password)
+**Status: ⏭️ NEXT (re-scoped based on product decision)**
 
-**User stories**
-1. As a user, I can log in and only see data permitted by my role and hotel.
-2. As an Admin, I can assign roles to users and invite hotel staff.
-3. As a Compliance Officer (optional), I can export audit trails and view data access logs.
-4. As a Hotel Manager, I can restrict who can edit/quarantine/requeue submissions.
-5. As support, I can view agent logs/metrics to debug failures quickly.
+#### Phase 3 guiding decisions (must-haves)
+- **No e-Devlet password field** in UI, API, storage, logs.
+- Separate concerns:
+  - **Human user access**: users log into *our* panel (JWT + RBAC).
+  - **Machine/service integration**: per-hotel KBS access parameters are configured via onboarding and stored securely.
+- Every data access is scoped by **tenant/hotel context** (unless Admin).
 
-**Steps**
-- Implement JWT auth + RBAC (Admin/Hotel Manager/Front Desk) with hotel scoping.
-- Enforce authorization on all endpoints + UI route guards.
-- KVKK enhancements:
-  - PII masking by role.
-  - Encryption-at-rest strategy (app-level field encryption for sensitive fields).
-  - Retention policy + deletion/anonymization job.
-  - Data access audit events (who viewed what).
-- Operator UX upgrades:
-  - Bulk retry/requeue, reason codes.
-  - Inline validation hints for TC/passport.
-- Conclude with role-based E2E test pass.
+#### Phase 3 user stories
+1. As a user, I can log in to the panel and only see data permitted by my role and assigned hotel(s).
+2. As an Admin, I can onboard a hotel with a guided wizard: region → EGM/Jandarma → integration type → agent assignment → credentials → test.
+3. As a Hotel Manager, I can manage my hotel’s KBS integration settings and monitor health.
+4. As Front Desk, I can run check-in flows without seeing sensitive integration credentials.
+5. As Support/IT (optional role), I can assist setup and view health diagnostics without broad PII exposure.
+6. As Compliance (optional role), I can export audit trails and view data access logs.
 
-**Exit criteria**
-- RBAC correct, audit complete, sensitive data exposure controlled.
+#### Phase 3 workstreams
+
+##### 3A) Authentication + RBAC + Tenant Context
+- Backend
+  - Add **users collection** and CRUD (admin-only for creation/invite in v1).
+  - Implement JWT auth (access token) + password hashing.
+  - Add authorization dependencies:
+    - `Admin`: global access.
+    - `Hotel Manager` / `Front Desk`: hotel-scoped access.
+    - Optional roles: `Compliance`, `IT Support`.
+  - Update all endpoints to enforce:
+    - `hotel_id` scoping on reads/writes.
+    - entity ownership (e.g., submissions belong to hotel).
+  - Add audit events for data access where necessary (Phase 3.5 KVKK section).
+- Frontend
+  - Add **Login page** (email/password) + logout.
+  - Route guards + role-based nav visibility.
+  - Tenant context handling:
+    - If user has one hotel → auto-select.
+    - If multiple hotels → prompt/select (topbar switcher).
+
+##### 3B) Hotel Onboarding Wizard (per-hotel)
+- UI: “KBS Entegrasyon Kurulum” wizard (Admin/Hotel Manager)
+  - Step 1: Hotel profile (name, tax, city, address, authorized person)
+  - Step 2: Authority region: **Emniyet / Jandarma** (or hybrid)
+  - Step 3: Integration type: **EGM KBS / Jandarma KBS**
+  - Step 4: Network prerequisites: static IP, IP whitelist guidance
+  - Step 5: Agent assignment/status (bridge agent installed? simulated now, real later)
+  - Step 6: Credentials / access parameters (see Vault below)
+  - Step 7: Test connection / test submission
+  - Step 8: Summary + state transitions
+- Backend
+  - Extend `Hotel` model with onboarding fields:
+    - `authority_region` (egm/jandarma/hybrid)
+    - `integration_type`
+    - `onboarding_status` and timestamps
+    - `authorized_contact` fields
+  - Endpoint(s):
+    - `POST/PUT /hotels/{id}/onboarding` (wizard step save)
+    - `POST /hotels/{id}/integration/test` (connectivity + auth sanity checks)
+
+##### 3C) Credential Vault (service credentials only)
+- Core requirement: store **officially issued** access parameters for integration (NOT e-Devlet passwords).
+- Fields (example; per integration type)
+  - KBS username / facility code / service user
+  - secret: password/token
+  - certificate/key uploads (future: file store; now: base64/placeholder)
+  - endpoint URL
+  - environment: test/prod
+  - whitelisted IPs
+- Backend
+  - New model(s): `KbsIntegrationConfig` (per hotel)
+  - Encryption-at-rest strategy:
+    - app-level field encryption for secrets (token/password/private key)
+    - ensure secrets never appear in logs/audit payloads
+  - Endpoints:
+    - `GET/PUT /hotels/{id}/kbs-config`
+    - `POST /hotels/{id}/kbs-config/rotate-secret`
+- Frontend
+  - “Credential Vault” page/tab:
+    - masked secret fields
+    - rotate/update flow
+    - view permissions restricted (Admin + Hotel Manager; never Front Desk)
+
+##### 3D) Official Redirect pages/buttons
+- UI provides **official portal redirect** actions without collecting credentials:
+  - Button: “EGM KBS giriş sayfasına git”
+  - Button: “Jandarma KBS / e‑Devlet doğrulama sayfasına git”
+- Copy & guidance section:
+  - After completing official authorization, return and input issued integration parameters into Vault.
+- No callback-based OAuth assumed unless official flow supports it; treat as informational redirect.
+
+##### 3E) Tenant-based Health Panel (per hotel)
+- UI (Hotel Manager/Admin)
+  - Agent online/offline + last heartbeat
+  - last successful connection test
+  - last successful submission / last error
+  - queue depth, quarantine count
+- Backend
+  - Add per-hotel health summary endpoint:
+    - `GET /hotels/{id}/health`
+
+##### 3F) KVKK/Compliance hardening (Phase 3.5)
+- PII masking by role (e.g., Front Desk sees minimal, Compliance sees more, Admin as needed).
+- Retention policy + anonymization/deletion job.
+- Data access audit events (who viewed what; avoid storing raw PII in audit payloads).
+
+**Phase 3 exit criteria**
+- ✅ Users must authenticate to access app.
+- ✅ RBAC enforced on backend endpoints and UI routes.
+- ✅ Tenant/hotel scoping prevents cross-hotel access.
+- ✅ Hotel onboarding wizard works end-to-end.
+- ✅ Credential Vault stores only service credentials; secrets are encrypted/masked.
+- ✅ Official redirects exist; **no e-Devlet password field anywhere**.
+- ✅ Health panel shows per-hotel status and basic diagnostics.
 
 ---
 
@@ -139,24 +236,38 @@
   - Per-hotel agent config, IP whitelist, environment separation.
   - Simulated “agent installation” state machine and versioning.
 - Produce checklists: go-live, compliance, operations.
-- Final regression E2E tests (core flows + failure scenarios + RBAC).
+- Final regression E2E tests (core flows + failure scenarios + RBAC + onboarding).
+
+---
 
 ## 3) Next Actions
-1. **Finish Phase 2 polish**:
-   - Add/standardize `data-testid` for sidebar navigation items.
-   - Stabilize Check-in hotel Select targeting (testids for option items / ensure predictable portal rendering).
-   - Quick sanity pass of TR/EN toggle coverage.
-2. Re-run lightweight UI E2E verification (manual + automated smoke).
-3. Start **Phase 3**:
-   - Implement JWT auth + RBAC models.
-   - Add tenant/hotel scoping to all reads/writes.
-   - Add KVKK controls (masking + retention + access logging).
+1. **Finish Phase 2 polish**
+   - Verify sidebar nav `data-testid` selectors across TR/EN; fix any missing/unstable ones.
+   - Stabilize Check-in hotel Select targeting: add `data-testid` to each option item.
+   - Remove Check-in tab/required-field race: reset irrelevant fields on guest type switch; ensure hidden fields are not required.
+2. Re-run lightweight UI E2E verification (manual + automated smoke) to confirm 100% demo stability.
+3. Start **Phase 3 Sprint 1 (Auth + RBAC)**
+   - Backend JWT + users + RBAC middleware
+   - Frontend login page + guards + role-based nav
+4. Phase 3 Sprint 2 (Hotel Onboarding Wizard)
+   - Wizard UI + onboarding endpoints + onboarding status model
+5. Phase 3 Sprint 3 (Credential Vault + Test Connection + Official Redirect)
+   - Secure secret storage + masked UI
+   - Test connection endpoint
+   - Official redirects + guidance screen
+6. Phase 3 Sprint 4 (Health Panel + KVKK baseline)
+   - Hotel health endpoint + UI
+   - PII masking + retention scaffolding + access audit events
+
+---
 
 ## 4) Success Criteria
 - ✅ Core pipeline deterministically passes: success, timeout, unavailable, duplicate, validation fail, delayed ack.
 - ✅ UI demonstrates: queue → attempts → final state (acked/retrying/quarantined) with audit timeline and XML viewer.
 - ✅ TC + Passport validation both work and produce actionable errors.
 - ✅ Agent heartbeat and offline mode are visible and affect processing.
-- 🟡 Phase 2 polish: navigation + hotel dropdown stability.
-- ⏭️ Phase 3: RBAC + KVKK-oriented controls prevent cross-hotel access and reduce PII exposure.
+- 🟡 Phase 2 polish: navigation + hotel dropdown stability + check-in tab validation reliability.
+- ⏭️ Phase 3: **Login + RBAC + tenant onboarding** and **KBS integration setup** implemented.
+- ⏭️ Phase 3: **No in-app e‑Devlet password**; only official redirect + per-hotel service credential configuration.
+- ⏭️ Phase 3: KVKK-oriented controls reduce PII exposure and add access logging.
 - ⏭️ Phase 4: Observability enables diagnosing failures without DB access; deployment and checklists ready for go-live.

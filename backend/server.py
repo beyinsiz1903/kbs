@@ -1,23 +1,34 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Depends
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import uuid
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime, timezone
+from cryptography.fernet import Fernet
+import base64
+import hashlib
 
 from models import (
     Hotel, Guest, CheckIn, Submission, SubmissionStatus, GuestType,
     AuditAction, AgentStatus, KBSSimulationMode,
     HotelCreate, GuestCreate, CheckInCreate, SubmissionCorrection, KBSModeUpdate,
+    HotelOnboardingUpdate, KbsConfigUpdate,
     serialize_doc, utcnow
 )
 from validators import validate_guest_data, generate_fingerprint
 from kbs_simulator import set_simulation_mode, get_simulation_mode, clear_processed_ids
 from agent_runtime import AgentManager
 from audit import log_audit_event, get_audit_trail, get_audit_stats
+from auth import (
+    get_current_user, get_optional_user, require_role,
+    check_hotel_access, filter_by_hotel_access,
+    hash_password, verify_password, create_access_token,
+    seed_default_admin, LoginRequest, UserCreate, UserUpdate, PasswordChange, TokenResponse
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -35,6 +46,25 @@ api_router = APIRouter(prefix="/api")
 
 # Agent Manager
 agent_manager = AgentManager(db)
+
+# Encryption for credential vault
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", None)
+if not ENCRYPTION_KEY:
+    # Derive a key from JWT secret for simplicity
+    key_bytes = hashlib.sha256(os.environ.get("JWT_SECRET_KEY", "kbs-bridge-secret-key-change-in-production-2024").encode()).digest()
+    ENCRYPTION_KEY = base64.urlsafe_b64encode(key_bytes)
+_fernet = Fernet(ENCRYPTION_KEY)
+
+def encrypt_secret(plaintext: str) -> str:
+    """Encrypt a secret value."""
+    return _fernet.encrypt(plaintext.encode()).decode()
+
+def decrypt_secret(ciphertext: str) -> str:
+    """Decrypt a secret value."""
+    try:
+        return _fernet.decrypt(ciphertext.encode()).decode()
+    except Exception:
+        return "***decryption_error***"
 
 # Configure logging
 logging.basicConfig(
@@ -63,6 +93,12 @@ async def startup():
     await db.attempts.create_index("submission_id")
     await db.audit_events.create_index([("hotel_id", 1), ("created_at", -1)])
     await db.agent_states.create_index("hotel_id", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.users.create_index("email", unique=True)
+    await db.kbs_configs.create_index("hotel_id", unique=True)
+    
+    # Seed default admin
+    await seed_default_admin(db)
     
     # Start agents for all active hotels
     async for hotel in db.hotels.find({"is_active": True}):
@@ -92,6 +128,111 @@ async def health_check():
         "timestamp": utcnow().isoformat(),
         "agents": agent_manager.get_all_status()
     }
+
+
+# ============= AUTHENTICATION =============
+
+@api_router.post("/auth/login")
+async def login(request: LoginRequest):
+    """Authenticate user and return JWT token."""
+    user = await db.users.find_one({"email": request.email, "is_active": True})
+    if not user or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Gecersiz e-posta veya sifre / Invalid email or password"
+        )
+    
+    token = create_access_token(
+        user_id=user["id"],
+        email=user["email"],
+        role=user["role"],
+        hotel_ids=user.get("hotel_ids", [])
+    )
+    
+    user_data = {
+        "id": user["id"],
+        "email": user["email"],
+        "first_name": user["first_name"],
+        "last_name": user["last_name"],
+        "role": user["role"],
+        "hotel_ids": user.get("hotel_ids", [])
+    }
+    
+    return {"access_token": token, "token_type": "bearer", "user": user_data}
+
+
+@api_router.get("/auth/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    """Get current user info."""
+    db_user = await db.users.find_one({"id": user["user_id"]}, {"_id": 0, "password_hash": 0})
+    if not db_user:
+        raise HTTPException(status_code=404, detail="Kullanici bulunamadi / User not found")
+    return serialize_doc(db_user)
+
+
+@api_router.post("/auth/change-password")
+async def change_password(data: PasswordChange, user: dict = Depends(get_current_user)):
+    """Change current user's password."""
+    db_user = await db.users.find_one({"id": user["user_id"]})
+    if not db_user or not verify_password(data.current_password, db_user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Mevcut sifre yanlis / Current password incorrect")
+    
+    await db.users.update_one(
+        {"id": user["user_id"]},
+        {"$set": {"password_hash": hash_password(data.new_password), "updated_at": utcnow().isoformat()}}
+    )
+    return {"message": "Sifre degistirildi / Password changed"}
+
+
+# ============= USER MANAGEMENT (Admin only) =============
+
+@api_router.get("/users")
+async def list_users(user: dict = Depends(require_role("admin"))):
+    """List all users (admin only)."""
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(200)
+    return [serialize_doc(u) for u in users]
+
+
+@api_router.post("/users")
+async def create_user(data: UserCreate, user: dict = Depends(require_role("admin"))):
+    """Create a new user (admin only)."""
+    existing = await db.users.find_one({"email": data.email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Bu e-posta zaten kullaniliyor / Email already in use")
+    
+    if data.role not in ["admin", "hotel_manager", "front_desk"]:
+        raise HTTPException(status_code=400, detail="Gecersiz rol / Invalid role")
+    
+    new_user = {
+        "id": str(uuid.uuid4()),
+        "email": data.email,
+        "password_hash": hash_password(data.password),
+        "first_name": data.first_name,
+        "last_name": data.last_name,
+        "role": data.role,
+        "hotel_ids": data.hotel_ids,
+        "is_active": True,
+        "created_at": utcnow().isoformat(),
+        "updated_at": utcnow().isoformat()
+    }
+    await db.users.insert_one(new_user)
+    
+    result = {k: v for k, v in new_user.items() if k not in ["_id", "password_hash"]}
+    return serialize_doc(result)
+
+
+@api_router.put("/users/{user_id}")
+async def update_user(user_id: str, data: UserUpdate, user: dict = Depends(require_role("admin"))):
+    """Update a user (admin only)."""
+    update_fields = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="Guncelleme verisi yok / No update data")
+    
+    update_fields["updated_at"] = utcnow().isoformat()
+    await db.users.update_one({"id": user_id}, {"$set": update_fields})
+    
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    return serialize_doc(updated)
 
 
 # ============= HOTEL MANAGEMENT =============
@@ -127,6 +268,204 @@ async def get_hotel(hotel_id: str):
     if not hotel:
         raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
     return serialize_doc(hotel)
+
+
+# ============= HOTEL ONBOARDING =============
+
+@api_router.put("/hotels/{hotel_id}/onboarding")
+async def update_hotel_onboarding(hotel_id: str, data: HotelOnboardingUpdate):
+    """Update hotel onboarding wizard data."""
+    hotel = await db.hotels.find_one({"id": hotel_id})
+    if not hotel:
+        raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
+    
+    update_fields = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="Guncelleme verisi yok / No update data")
+    
+    update_fields["updated_at"] = utcnow().isoformat()
+    
+    await db.hotels.update_one({"id": hotel_id}, {"$set": update_fields})
+    
+    await log_audit_event(db, hotel_id, AuditAction.CHECKIN_CREATED, "hotel", hotel_id,
+                         {"action": "onboarding_update", "fields": list(update_fields.keys())}, actor="system")
+    
+    updated = await db.hotels.find_one({"id": hotel_id}, {"_id": 0})
+    return serialize_doc(updated)
+
+
+@api_router.post("/hotels/{hotel_id}/integration/test")
+async def test_hotel_integration(hotel_id: str):
+    """Test hotel's KBS integration connectivity (simulated)."""
+    hotel = await db.hotels.find_one({"id": hotel_id})
+    if not hotel:
+        raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
+    
+    config = await db.kbs_configs.find_one({"hotel_id": hotel_id})
+    
+    # Simulated connection test
+    import random
+    success = random.random() > 0.2  # 80% success rate for simulation
+    
+    test_result = {
+        "success": success,
+        "timestamp": utcnow().isoformat(),
+        "details": {
+            "endpoint_reachable": success,
+            "auth_valid": success,
+            "test_submission_sent": success,
+            "response_time_ms": random.randint(50, 500) if success else None,
+        },
+        "message": "Baglanti basarili / Connection successful" if success else "Baglanti basarisiz / Connection failed - check credentials and endpoint"
+    }
+    
+    # Update config with test result
+    if config:
+        await db.kbs_configs.update_one(
+            {"hotel_id": hotel_id},
+            {"$set": {
+                "last_connection_test": utcnow().isoformat(),
+                "last_connection_success": success,
+                "last_connection_error": None if success else "Simulated connection failure",
+                "updated_at": utcnow().isoformat()
+            }}
+        )
+    
+    # Update onboarding status if testing
+    if success and hotel.get("onboarding_status") in ["testing", "credentials_pending"]:
+        await db.hotels.update_one(
+            {"id": hotel_id},
+            {"$set": {"onboarding_status": "active", "updated_at": utcnow().isoformat()}}
+        )
+    
+    return test_result
+
+
+# ============= CREDENTIAL VAULT (KBS Integration Config) =============
+
+@api_router.get("/hotels/{hotel_id}/kbs-config")
+async def get_kbs_config(hotel_id: str):
+    """Get KBS integration config for a hotel (secrets are masked)."""
+    config = await db.kbs_configs.find_one({"hotel_id": hotel_id}, {"_id": 0})
+    if not config:
+        return {"hotel_id": hotel_id, "configured": False}
+    
+    result = serialize_doc(config)
+    # Mask the encrypted secret
+    if result.get("encrypted_secret"):
+        result["has_secret"] = True
+        result["encrypted_secret"] = "********"
+    else:
+        result["has_secret"] = False
+    
+    result["configured"] = True
+    return result
+
+
+@api_router.put("/hotels/{hotel_id}/kbs-config")
+async def update_kbs_config(hotel_id: str, data: KbsConfigUpdate):
+    """Update KBS integration credentials for a hotel."""
+    hotel = await db.hotels.find_one({"id": hotel_id})
+    if not hotel:
+        raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
+    
+    update_fields = {}
+    for k, v in data.model_dump(exclude_none=True).items():
+        if k == "secret" and v:
+            # Encrypt the secret before storage
+            update_fields["encrypted_secret"] = encrypt_secret(v)
+        else:
+            update_fields[k] = v
+    
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="Guncelleme verisi yok / No update data")
+    
+    update_fields["updated_at"] = utcnow().isoformat()
+    
+    existing = await db.kbs_configs.find_one({"hotel_id": hotel_id})
+    if existing:
+        await db.kbs_configs.update_one({"hotel_id": hotel_id}, {"$set": update_fields})
+    else:
+        update_fields["id"] = str(uuid.uuid4())
+        update_fields["hotel_id"] = hotel_id
+        update_fields["created_at"] = utcnow().isoformat()
+        await db.kbs_configs.insert_one(update_fields)
+    
+    # Update hotel onboarding status
+    if hotel.get("onboarding_status") in ["not_started", "in_progress"]:
+        await db.hotels.update_one(
+            {"id": hotel_id},
+            {"$set": {"onboarding_status": "credentials_pending", "updated_at": utcnow().isoformat()}}
+        )
+    
+    await log_audit_event(db, hotel_id, AuditAction.CHECKIN_CREATED, "hotel", hotel_id,
+                         {"action": "kbs_config_update", "fields": [k for k in update_fields.keys() if k != "encrypted_secret"]},
+                         actor="system")
+    
+    # Return masked config
+    return await get_kbs_config(hotel_id)
+
+
+# ============= HOTEL HEALTH =============
+
+@api_router.get("/hotels/{hotel_id}/health")
+async def get_hotel_health(hotel_id: str):
+    """Get per-hotel health summary."""
+    hotel = await db.hotels.find_one({"id": hotel_id}, {"_id": 0})
+    if not hotel:
+        raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
+    
+    # Agent status
+    agent_state = await db.agent_states.find_one({"hotel_id": hotel_id}, {"_id": 0})
+    
+    # KBS config
+    kbs_config = await db.kbs_configs.find_one({"hotel_id": hotel_id}, {"_id": 0})
+    
+    # Submission stats
+    pipeline = [
+        {"$match": {"hotel_id": hotel_id}},
+        {"$group": {"_id": "$status", "count": {"$sum": 1}}}
+    ]
+    status_counts = {}
+    async for doc in db.submissions.aggregate(pipeline):
+        status_counts[doc["_id"]] = doc["count"]
+    
+    # Last successful submission
+    last_success = await db.submissions.find_one(
+        {"hotel_id": hotel_id, "status": "acked"},
+        {"_id": 0, "id": 1, "updated_at": 1}
+    )
+    
+    # Last error
+    last_error_sub = await db.submissions.find_one(
+        {"hotel_id": hotel_id, "status": {"$in": ["failed", "quarantined"]}},
+        {"_id": 0, "id": 1, "last_error": 1, "updated_at": 1}
+    )
+    
+    return {
+        "hotel": serialize_doc(hotel),
+        "agent": {
+            "status": agent_state.get("status", "offline") if agent_state else "offline",
+            "last_heartbeat": agent_state.get("last_heartbeat") if agent_state else None,
+            "queue_size": agent_state.get("queue_size", 0) if agent_state else 0,
+            "processed_today": agent_state.get("processed_today", 0) if agent_state else 0,
+            "failed_today": agent_state.get("failed_today", 0) if agent_state else 0,
+        },
+        "integration": {
+            "configured": bool(kbs_config),
+            "last_connection_test": kbs_config.get("last_connection_test") if kbs_config else None,
+            "last_connection_success": kbs_config.get("last_connection_success") if kbs_config else None,
+            "environment": kbs_config.get("environment", "test") if kbs_config else None,
+        },
+        "submissions": {
+            "by_status": status_counts,
+            "total": sum(status_counts.values()),
+            "quarantined": status_counts.get("quarantined", 0),
+            "last_successful": serialize_doc(last_success) if last_success else None,
+            "last_error": serialize_doc(last_error_sub) if last_error_sub else None,
+        },
+        "onboarding_status": hotel.get("onboarding_status", "not_started")
+    }
 
 
 # ============= GUEST MANAGEMENT =============
@@ -586,7 +925,7 @@ async def reset_demo():
     await db.guests.delete_many({})
     await db.agent_states.delete_many({})
     
-    # Don't delete hotels - keep them for demo
+    # Don't delete hotels, users, or kbs_configs - keep them for demo
     
     set_simulation_mode("normal")
     clear_processed_ids()

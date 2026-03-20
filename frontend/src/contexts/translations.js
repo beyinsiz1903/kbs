@@ -13,7 +13,8 @@ export const translations = {
       operations: 'Operasyonlar',
       monitoring: 'Izleme',
       compliance: 'Uyumluluk',
-      admin: 'Yonetim'
+      admin: 'Yonetim',
+      users: 'Kullanicilar'
     },
     dashboard: {
       title: 'KBS Kopru Yonetim Sistemi',
@@ -179,7 +180,8 @@ export const translations = {
       operations: 'Operations',
       monitoring: 'Monitoring',
       compliance: 'Compliance',
-      admin: 'Admin'
+      admin: 'Admin',
+      users: 'Users'
     },
     dashboard: {
       title: 'KBS Bridge Management System',

@@ -1,30 +1,38 @@
 [
   {
-    "content": "Phase 1: Core Flow POC (52/52 tests passed)",
+    "content": "Phase 2 Fix: CheckInForm dropdown race condition",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Design Agent call for UI/UX guidelines",
+    "content": "Phase 2 Fix: Add data-testid to SelectItem options",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Full App Development (Backend + Frontend)",
+    "content": "Phase 3A: Backend JWT auth + User model + RBAC middleware",
     "status": "completed"
   },
   {
-    "content": "Phase 2: All user stories covered in Development",
+    "content": "Phase 3A: Frontend Login page + route guards + role-based nav + auth context",
     "status": "completed"
   },
   {
-    "content": "Phase 2: End-to-end testing with Testing Agent (Backend 100%, Frontend 75%)",
+    "content": "Phase 3B: Hotel Onboarding Wizard (frontend)",
     "status": "completed"
   },
   {
-    "content": "Phase 3: RBAC, Security, KVKK Compliance",
-    "status": "pending"
+    "content": "Phase 3C: Credential Vault (backend encrypted storage + frontend masked UI)",
+    "status": "completed"
   },
   {
-    "content": "Phase 4: Observability, Deployment, Checklists",
-    "status": "pending"
+    "content": "Phase 3D: Official Redirect buttons (EGM KBS + Jandarma/e-Devlet)",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 3E: Tenant-based Health Panel per hotel",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 3: Testing with testing_agent",
+    "status": "in_progress"
   }
 ]

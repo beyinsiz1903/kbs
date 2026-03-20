@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAuth } from '../contexts/AuthContext';
 import { getHotels, createHotel, getAgents } from '../lib/api';
 import { AgentStatusBadge } from '../components/StatusBadge';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
+import { Badge } from '../components/ui/badge';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow
 } from '../components/ui/table';
@@ -13,11 +16,27 @@ import { ScrollArea } from '../components/ui/scroll-area';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { toast } from 'sonner';
 import {
-  Building2, Plus, RefreshCw, MapPin
+  Building2, Plus, RefreshCw, MapPin, Settings, Heart
 } from 'lucide-react';
 
+const ONBOARDING_STATUS_BADGES = {
+  not_started: 'bg-slate-500/15 text-slate-200 border-slate-500/30',
+  in_progress: 'bg-amber-500/15 text-amber-200 border-amber-500/30',
+  credentials_pending: 'bg-cyan-500/15 text-cyan-200 border-cyan-500/30',
+  testing: 'bg-cyan-500/15 text-cyan-200 border-cyan-500/30',
+  active: 'bg-emerald-500/15 text-emerald-200 border-emerald-500/30',
+  blocked: 'bg-rose-500/15 text-rose-200 border-rose-500/30',
+};
+
+const ONBOARDING_LABELS = {
+  tr: { not_started: 'Baslanmadi', in_progress: 'Devam Ediyor', credentials_pending: 'Bilgi Bekleniyor', testing: 'Test Edilyor', active: 'Aktif', blocked: 'Bloke' },
+  en: { not_started: 'Not Started', in_progress: 'In Progress', credentials_pending: 'Credentials Pending', testing: 'Testing', active: 'Active', blocked: 'Blocked' },
+};
+
 export default function HotelsPage() {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
+  const { isAdmin, isManager } = useAuth();
+  const navigate = useNavigate();
   const [hotels, setHotels] = useState([]);
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -54,13 +73,13 @@ export default function HotelsPage() {
 
   const handleCreate = async () => {
     if (!form.name || !form.tax_number || !form.city) {
-      toast.error('Zorunlu alanlar eksik / Required fields missing');
+      toast.error(language === 'tr' ? 'Zorunlu alanlar eksik' : 'Required fields missing');
       return;
     }
     setCreating(true);
     try {
       await createHotel(form);
-      toast.success('Otel eklendi / Hotel added');
+      toast.success(language === 'tr' ? 'Otel eklendi' : 'Hotel added');
       setDialogOpen(false);
       setForm({ name: '', tax_number: '', city: '', address: '', kbs_institution_code: '' });
       fetchData();
@@ -78,9 +97,11 @@ export default function HotelsPage() {
           <h1 className="text-3xl font-semibold tracking-tight">{t('hotels.title')}</h1>
           <p className="text-muted-foreground mt-1">{t('hotels.subtitle')}</p>
         </div>
-        <Button onClick={() => setDialogOpen(true)} data-testid="hotel-create-button">
-          <Plus className="h-4 w-4 mr-2" /> {t('hotels.addHotel')}
-        </Button>
+        {(isAdmin || isManager) && (
+          <Button onClick={() => setDialogOpen(true)} data-testid="hotel-create-button">
+            <Plus className="h-4 w-4 mr-2" /> {t('hotels.addHotel')}
+          </Button>
+        )}
       </div>
 
       {hotels.length === 0 && !loading ? (
@@ -102,15 +123,16 @@ export default function HotelsPage() {
                   <TableHead>{t('hotels.name')}</TableHead>
                   <TableHead>{t('hotels.city')}</TableHead>
                   <TableHead className="hidden md:table-cell">{t('hotels.taxNumber')}</TableHead>
-                  <TableHead className="hidden lg:table-cell">{t('hotels.kbsCode')}</TableHead>
+                  <TableHead>{language === 'tr' ? 'Onboarding' : 'Onboarding'}</TableHead>
                   <TableHead>{t('hotels.agentStatus')}</TableHead>
+                  <TableHead className="w-[120px]">{language === 'tr' ? 'Islemler' : 'Actions'}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
                   Array(3).fill(0).map((_, i) => (
                     <TableRow key={i} className="border-border/20">
-                      {Array(5).fill(0).map((_, j) => (
+                      {Array(6).fill(0).map((_, j) => (
                         <TableCell key={j}>
                           <div className="h-4 bg-muted/30 rounded animate-pulse" />
                         </TableCell>
@@ -118,27 +140,58 @@ export default function HotelsPage() {
                     </TableRow>
                   ))
                 ) : (
-                  hotels.map((hotel) => (
-                    <TableRow key={hotel.id} className="border-border/20 hover:bg-muted/20" data-testid={`hotel-row-${hotel.id}`}>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          <Building2 className="h-4 w-4 text-primary/60" />
-                          <span className="font-medium">{hotel.name}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                          <MapPin className="h-3.5 w-3.5" />
-                          {hotel.city}
-                        </div>
-                      </TableCell>
-                      <TableCell className="hidden md:table-cell font-mono text-sm">{hotel.tax_number}</TableCell>
-                      <TableCell className="hidden lg:table-cell font-mono text-xs text-muted-foreground">{hotel.kbs_institution_code || '-'}</TableCell>
-                      <TableCell>
-                        <AgentStatusBadge online={getAgentStatus(hotel.id)} />
-                      </TableCell>
-                    </TableRow>
-                  ))
+                  hotels.map((hotel) => {
+                    const obStatus = hotel.onboarding_status || 'not_started';
+                    return (
+                      <TableRow key={hotel.id} className="border-border/20 hover:bg-muted/20" data-testid={`hotel-row-${hotel.id}`}>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            <Building2 className="h-4 w-4 text-primary/60" />
+                            <span className="font-medium">{hotel.name}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                            <MapPin className="h-3.5 w-3.5" />
+                            {hotel.city}
+                          </div>
+                        </TableCell>
+                        <TableCell className="hidden md:table-cell font-mono text-sm">{hotel.tax_number}</TableCell>
+                        <TableCell>
+                          <Badge className={`${ONBOARDING_STATUS_BADGES[obStatus] || ONBOARDING_STATUS_BADGES.not_started} border text-xs`}>
+                            {ONBOARDING_LABELS[language]?.[obStatus] || obStatus}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <AgentStatusBadge online={getAgentStatus(hotel.id)} />
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => navigate(`/hotels/${hotel.id}/onboarding`)}
+                              data-testid={`hotel-onboarding-${hotel.id}`}
+                              title={language === 'tr' ? 'KBS Kurulum' : 'KBS Setup'}
+                            >
+                              <Settings className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => navigate(`/hotels/${hotel.id}/health`)}
+                              data-testid={`hotel-health-${hotel.id}`}
+                              title={language === 'tr' ? 'Saglik Paneli' : 'Health Panel'}
+                            >
+                              <Heart className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
                 )}
               </TableBody>
             </Table>

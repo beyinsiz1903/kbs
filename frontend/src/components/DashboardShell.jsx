@@ -1,55 +1,86 @@
 import React, { useState } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAuth } from '../contexts/AuthContext';
 import { Button } from './ui/button';
 import { ScrollArea } from './ui/scroll-area';
 import { Separator } from './ui/separator';
+import { Badge } from './ui/badge';
 import {
   LayoutDashboard, UserPlus, Send, Activity, Radio, FileText,
-  Building2, Globe, Menu, X, ChevronRight
+  Building2, Globe, Menu, X, ChevronRight, LogOut, Users, Settings,
+  Heart
 } from 'lucide-react';
 
-const navGroups = (t) => [
-  {
-    label: t('nav.overview'),
-    items: [
-      { path: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
-    ]
-  },
-  {
-    label: t('nav.operations'),
-    items: [
-      { path: '/checkin', icon: UserPlus, label: t('nav.checkin') },
-      { path: '/submissions', icon: Send, label: t('nav.submissions') },
-    ]
-  },
-  {
-    label: t('nav.monitoring'),
-    items: [
-      { path: '/agents', icon: Activity, label: t('nav.agents') },
-      { path: '/kbs-control', icon: Radio, label: t('nav.kbsControl') },
-    ]
-  },
-  {
-    label: t('nav.compliance'),
-    items: [
-      { path: '/audit', icon: FileText, label: t('nav.audit') },
-    ]
-  },
-  {
-    label: t('nav.admin'),
-    items: [
-      { path: '/hotels', icon: Building2, label: t('nav.hotels') },
-    ]
+const ROLE_LABELS = {
+  tr: { admin: 'Yonetici', hotel_manager: 'Otel Muduru', front_desk: 'Resepsiyon' },
+  en: { admin: 'Admin', hotel_manager: 'Manager', front_desk: 'Front Desk' },
+};
+
+const navGroups = (t, role) => {
+  const groups = [
+    {
+      label: t('nav.overview'),
+      items: [
+        { path: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
+      ]
+    },
+    {
+      label: t('nav.operations'),
+      items: [
+        { path: '/checkin', icon: UserPlus, label: t('nav.checkin') },
+        { path: '/submissions', icon: Send, label: t('nav.submissions') },
+      ]
+    },
+    {
+      label: t('nav.monitoring'),
+      items: [
+        { path: '/agents', icon: Activity, label: t('nav.agents') },
+        { path: '/kbs-control', icon: Radio, label: t('nav.kbsControl') },
+      ]
+    },
+    {
+      label: t('nav.compliance'),
+      items: [
+        { path: '/audit', icon: FileText, label: t('nav.audit') },
+      ]
+    },
+    {
+      label: t('nav.admin'),
+      items: [
+        { path: '/hotels', icon: Building2, label: t('nav.hotels') },
+      ]
+    }
+  ];
+
+  // Add user management for admin only
+  if (role === 'admin') {
+    groups[groups.length - 1].items.push(
+      { path: '/users', icon: Users, label: t('nav.users') || 'Kullanicilar' }
+    );
   }
-];
+
+  // For front_desk, remove monitoring and compliance sections
+  if (role === 'front_desk') {
+    return groups.filter(g => g.label !== t('nav.monitoring') && g.label !== t('nav.admin'));
+  }
+
+  return groups;
+};
 
 export function DashboardShell({ children }) {
   const { t, language, toggleLanguage } = useLanguage();
+  const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate();
 
-  const groups = navGroups(t);
+  const groups = navGroups(t, user?.role);
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
 
   return (
     <div className="min-h-screen bg-background" data-testid="dashboard-shell">
@@ -126,22 +157,43 @@ export function DashboardShell({ children }) {
             </nav>
           </ScrollArea>
 
-          {/* Footer */}
+          {/* User Info + Footer */}
           <Separator className="bg-border/30" />
-          <div className="px-4 py-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={toggleLanguage}
-              className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
-              data-testid="language-toggle"
-            >
-              <Globe className="h-4 w-4" />
-              <span className="text-xs">{language === 'tr' ? 'Turkce' : 'English'}</span>
-              <span className="ml-auto text-[10px] font-mono bg-muted px-1.5 py-0.5 rounded">
-                {language.toUpperCase()}
-              </span>
-            </Button>
+          <div className="px-4 py-3 space-y-2">
+            {/* User info */}
+            {user && (
+              <div className="flex items-center gap-3 px-2 py-2">
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 border border-primary/20 text-xs font-semibold text-primary">
+                  {user.first_name?.[0]}{user.last_name?.[0]}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium truncate">{user.first_name} {user.last_name}</p>
+                  <p className="text-[10px] text-muted-foreground truncate">{ROLE_LABELS[language]?.[user.role] || user.role}</p>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={toggleLanguage}
+                className="flex-1 justify-start gap-2 text-muted-foreground hover:text-foreground h-8"
+                data-testid="language-toggle"
+              >
+                <Globe className="h-3.5 w-3.5" />
+                <span className="text-xs">{language === 'tr' ? 'TR' : 'EN'}</span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleLogout}
+                className="h-8 w-8 text-muted-foreground hover:text-rose-400"
+                data-testid="logout-button"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+              </Button>
+            </div>
           </div>
         </div>
       </aside>
@@ -162,6 +214,13 @@ export function DashboardShell({ children }) {
 
           {/* Breadcrumb area */}
           <div className="flex-1" />
+
+          {/* User role badge */}
+          {user && (
+            <Badge variant="outline" className="text-[10px] border-border/50 bg-card/40" data-testid="user-role-badge">
+              {ROLE_LABELS[language]?.[user.role] || user.role}
+            </Badge>
+          )}
 
           {/* Language toggle (desktop) */}
           <Button

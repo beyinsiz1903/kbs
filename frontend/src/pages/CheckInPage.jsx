@@ -43,6 +43,25 @@ export default function CheckInPage() {
     setForm(prev => ({ ...prev, [field]: value }));
   };
 
+  // Reset irrelevant fields deterministically on guest type switch
+  const handleGuestTypeChange = (newType) => {
+    setGuestType(newType);
+    if (newType === 'tc_citizen') {
+      setForm(prev => ({
+        ...prev,
+        passport_no: '',
+        nationality: '',
+        passport_country: '',
+        passport_expiry: ''
+      }));
+    } else {
+      setForm(prev => ({
+        ...prev,
+        tc_kimlik_no: ''
+      }));
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!form.hotel_id) {
@@ -133,7 +152,7 @@ export default function CheckInPage() {
                   </SelectTrigger>
                   <SelectContent>
                     {hotels.map(h => (
-                      <SelectItem key={h.id} value={h.id}>{h.name} - {h.city}</SelectItem>
+                      <SelectItem key={h.id} value={h.id} data-testid={`checkin-hotel-option-${h.id}`}>{h.name} - {h.city}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -149,7 +168,7 @@ export default function CheckInPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <Tabs value={guestType} onValueChange={setGuestType}>
+                <Tabs value={guestType} onValueChange={handleGuestTypeChange}>
                   <TabsList className="grid w-full grid-cols-2">
                     <TabsTrigger value="tc_citizen" data-testid="checkin-type-tc">
                       {t('checkin.tcCitizen')}
