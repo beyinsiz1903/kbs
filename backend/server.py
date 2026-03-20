@@ -160,6 +160,10 @@ async def login(request: LoginRequest):
         hotel_ids=user.get("hotel_ids", [])
     )
     
+    # Log successful login for KVKK compliance
+    await log_audit_event(db, "system", AuditAction.LOGIN_SUCCESS, "user", user["id"],
+                         {"email": user["email"], "role": user["role"]}, actor=user["email"])
+    
     user_data = {
         "id": user["id"],
         "email": user["email"],
@@ -922,6 +926,562 @@ async def get_metrics_timeline(hotel_id: str = Query(None), hours: int = Query(2
     submissions = await db.submissions.find(query, {"_id": 0, "status": 1, "created_at": 1}).to_list(1000)
     
     return {"items": submissions, "since": since.isoformat()}
+
+
+# ============= OBSERVABILITY =============
+
+@api_router.get("/observability")
+async def get_observability(hotel_id: str = Query(None)):
+    """Phase 4: Comprehensive observability data for monitoring."""
+    from datetime import timedelta
+
+    # 1. Submission stats by status
+    status_pipeline = []
+    if hotel_id:
+        status_pipeline.append({"$match": {"hotel_id": hotel_id}})
+    status_pipeline.append({"$group": {"_id": "$status", "count": {"$sum": 1}}})
+    status_counts = {}
+    async for doc in db.submissions.aggregate(status_pipeline):
+        status_counts[doc["_id"]] = doc["count"]
+
+    total = sum(status_counts.values())
+    success_count = status_counts.get("acked", 0)
+    retry_count = status_counts.get("retrying", 0)
+    quarantine_count = status_counts.get("quarantined", 0)
+    failed_count = status_counts.get("failed", 0)
+    queued_count = status_counts.get("queued", 0) + status_counts.get("sending", 0) + status_counts.get("pending", 0)
+
+    success_rate = round((success_count / total * 100), 1) if total > 0 else 0
+    failure_rate = round(((quarantine_count + failed_count) / total * 100), 1) if total > 0 else 0
+
+    # 2. Per-hotel breakdown
+    hotel_pipeline = [
+        {"$group": {
+            "_id": {"hotel_id": "$hotel_id", "status": "$status"},
+            "count": {"$sum": 1}
+        }}
+    ]
+    if hotel_id:
+        hotel_pipeline.insert(0, {"$match": {"hotel_id": hotel_id}})
+
+    hotel_stats_raw = {}
+    async for doc in db.submissions.aggregate(hotel_pipeline):
+        hid = doc["_id"]["hotel_id"]
+        st = doc["_id"]["status"]
+        if hid not in hotel_stats_raw:
+            hotel_stats_raw[hid] = {}
+        hotel_stats_raw[hid][st] = doc["count"]
+
+    # 3. Agent statuses with heartbeat freshness
+    agent_query = {"hotel_id": hotel_id} if hotel_id else {}
+    agents_raw = await db.agent_states.find(agent_query, {"_id": 0}).to_list(100)
+    now = utcnow()
+
+    agents_health = []
+    for ag in agents_raw:
+        hb = ag.get("last_heartbeat")
+        freshness_seconds = None
+        heartbeat_stale = True
+        if hb:
+            try:
+                hb_dt = datetime.fromisoformat(hb.replace("Z", "+00:00")) if isinstance(hb, str) else hb
+                freshness_seconds = (now - hb_dt).total_seconds()
+                heartbeat_stale = freshness_seconds > 60
+            except Exception:
+                pass
+
+        agents_health.append({
+            "hotel_id": ag.get("hotel_id"),
+            "status": ag.get("status", "offline"),
+            "last_heartbeat": hb,
+            "heartbeat_freshness_seconds": round(freshness_seconds, 1) if freshness_seconds is not None else None,
+            "heartbeat_stale": heartbeat_stale,
+            "queue_size": ag.get("queue_size", 0),
+            "processed_today": ag.get("processed_today", 0),
+            "failed_today": ag.get("failed_today", 0),
+        })
+
+    # 4. Last successful and failed transmissions per hotel
+    hotels_list = await db.hotels.find({} if not hotel_id else {"id": hotel_id}, {"_id": 0, "id": 1, "name": 1, "onboarding_status": 1, "authority_region": 1, "integration_type": 1}).to_list(100)
+
+    tenant_readiness = []
+    for h in hotels_list:
+        hid = h["id"]
+        # Last success
+        last_ok = await db.submissions.find_one(
+            {"hotel_id": hid, "status": "acked"},
+            {"_id": 0, "id": 1, "updated_at": 1},
+            sort=[("updated_at", -1)]
+        )
+        # Last error
+        last_err = await db.submissions.find_one(
+            {"hotel_id": hid, "status": {"$in": ["failed", "quarantined"]}},
+            {"_id": 0, "id": 1, "last_error": 1, "updated_at": 1, "status": 1},
+            sort=[("updated_at", -1)]
+        )
+        # KBS config
+        kbs_cfg = await db.kbs_configs.find_one({"hotel_id": hid}, {"_id": 0, "last_connection_test": 1, "last_connection_success": 1})
+        # Agent
+        ag = next((a for a in agents_health if a["hotel_id"] == hid), None)
+
+        h_stats = hotel_stats_raw.get(hid, {})
+        h_total = sum(h_stats.values())
+        h_success = h_stats.get("acked", 0)
+
+        tenant_readiness.append({
+            "hotel_id": hid,
+            "hotel_name": h.get("name"),
+            "onboarding_status": h.get("onboarding_status", "not_started"),
+            "authority_region": h.get("authority_region"),
+            "integration_type": h.get("integration_type"),
+            "agent_online": ag["status"] == "online" if ag else False,
+            "agent_heartbeat_stale": ag["heartbeat_stale"] if ag else True,
+            "credential_configured": bool(kbs_cfg),
+            "credential_test_success": kbs_cfg.get("last_connection_success") if kbs_cfg else None,
+            "submission_total": h_total,
+            "submission_success_rate": round((h_success / h_total * 100), 1) if h_total > 0 else 0,
+            "last_successful_transmission": serialize_doc(last_ok) if last_ok else None,
+            "last_failed_transmission": serialize_doc(last_err) if last_err else None,
+        })
+
+    return {
+        "summary": {
+            "total_submissions": total,
+            "success_count": success_count,
+            "retry_count": retry_count,
+            "quarantine_count": quarantine_count,
+            "queued_count": queued_count,
+            "success_rate": success_rate,
+            "failure_rate": failure_rate,
+            "by_status": status_counts,
+        },
+        "agents": agents_health,
+        "tenants": tenant_readiness,
+        "timestamp": now.isoformat(),
+    }
+
+
+# ============= GO-LIVE CHECKLIST =============
+
+@api_router.get("/hotels/{hotel_id}/go-live-checklist")
+async def get_go_live_checklist(hotel_id: str):
+    """Phase 4: Compute per-hotel go-live readiness checklist."""
+    hotel = await db.hotels.find_one({"id": hotel_id}, {"_id": 0})
+    if not hotel:
+        raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
+
+    kbs_cfg = await db.kbs_configs.find_one({"hotel_id": hotel_id}, {"_id": 0})
+    agent_state = await db.agent_states.find_one({"hotel_id": hotel_id}, {"_id": 0})
+
+    # Check for test submission success
+    test_sub_ok = await db.submissions.find_one(
+        {"hotel_id": hotel_id, "status": "acked"}, {"_id": 0, "id": 1}
+    )
+    # Check retry/quarantine flow
+    retry_sub = await db.submissions.find_one(
+        {"hotel_id": hotel_id, "status": {"$in": ["retrying", "quarantined"]}}, {"_id": 0, "id": 1}
+    )
+    requeued_sub = await db.audit_events.find_one(
+        {"hotel_id": hotel_id, "action": "requeued"}, {"_id": 0, "id": 1}
+    )
+    # Check audit trail
+    audit_count = await db.audit_events.count_documents({"hotel_id": hotel_id})
+
+    items = [
+        {
+            "key": "authority_region",
+            "label_tr": "Yetki bolgesi (EGM/Jandarma) secildi mi?",
+            "label_en": "Authority region (EGM/Jandarma) selected?",
+            "passed": bool(hotel.get("authority_region")),
+            "detail": hotel.get("authority_region") or "Secilmedi / Not selected",
+            "category": "configuration"
+        },
+        {
+            "key": "integration_type",
+            "label_tr": "Entegrasyon tipi secildi mi?",
+            "label_en": "Integration type selected?",
+            "passed": bool(hotel.get("integration_type")),
+            "detail": hotel.get("integration_type") or "Secilmedi / Not selected",
+            "category": "configuration"
+        },
+        {
+            "key": "contact_info",
+            "label_tr": "Yetkili iletisim bilgileri girildi mi?",
+            "label_en": "Authorized contact info filled?",
+            "passed": bool(hotel.get("authorized_contact_name") and hotel.get("authorized_contact_phone")),
+            "detail": hotel.get("authorized_contact_name") or "Girilmedi / Not filled",
+            "category": "configuration"
+        },
+        {
+            "key": "static_ip",
+            "label_tr": "Sabit IP adresi tanimli mi?",
+            "label_en": "Static IP address configured?",
+            "passed": bool(hotel.get("static_ip")),
+            "detail": hotel.get("static_ip") or "Tanimlanmadi / Not configured",
+            "category": "network"
+        },
+        {
+            "key": "credentials",
+            "label_tr": "Resmi erisim bilgileri girildi mi?",
+            "label_en": "Official access credentials entered?",
+            "passed": bool(kbs_cfg and kbs_cfg.get("encrypted_secret")),
+            "detail": "Yapilandirildi / Configured" if (kbs_cfg and kbs_cfg.get("encrypted_secret")) else "Girilmedi / Not entered",
+            "category": "credentials"
+        },
+        {
+            "key": "credential_test",
+            "label_tr": "Baglanti testi basarili mi?",
+            "label_en": "Connection test successful?",
+            "passed": bool(kbs_cfg and kbs_cfg.get("last_connection_success")),
+            "detail": kbs_cfg.get("last_connection_test", "Henuz test yapilmadi / Not tested yet") if kbs_cfg else "Henuz test yapilmadi / Not tested yet",
+            "category": "credentials"
+        },
+        {
+            "key": "agent_online",
+            "label_tr": "Agent cevrimici mi?",
+            "label_en": "Agent online?",
+            "passed": bool(agent_state and agent_state.get("status") == "online"),
+            "detail": agent_state.get("status", "offline") if agent_state else "offline",
+            "category": "agent"
+        },
+        {
+            "key": "test_submission",
+            "label_tr": "Test gonderimi basarili mi?",
+            "label_en": "Test submission successful?",
+            "passed": bool(test_sub_ok),
+            "detail": "Basarili / Successful" if test_sub_ok else "Henuz test gonderimi yok / No test submission yet",
+            "category": "testing"
+        },
+        {
+            "key": "retry_flow",
+            "label_tr": "Retry/Karantina akisi dogrulandi mi?",
+            "label_en": "Retry/quarantine flow verified?",
+            "passed": bool(retry_sub or requeued_sub),
+            "detail": "Dogrulandi / Verified" if (retry_sub or requeued_sub) else "Henuz dogrulanmadi / Not verified yet",
+            "category": "testing"
+        },
+        {
+            "key": "audit_trail",
+            "label_tr": "Denetim izi gorunuyor mu?",
+            "label_en": "Audit trail visible?",
+            "passed": audit_count > 0,
+            "detail": f"{audit_count} kayit / {audit_count} events",
+            "category": "compliance"
+        },
+    ]
+
+    passed_count = sum(1 for i in items if i["passed"])
+    total_count = len(items)
+
+    return {
+        "hotel_id": hotel_id,
+        "hotel_name": hotel.get("name"),
+        "items": items,
+        "passed": passed_count,
+        "total": total_count,
+        "ready": passed_count == total_count,
+        "readiness_percentage": round((passed_count / total_count * 100), 1) if total_count > 0 else 0,
+    }
+
+
+# ============= KVKK / COMPLIANCE =============
+
+@api_router.get("/compliance/status")
+async def get_compliance_status(user: dict = Depends(require_role("admin", "hotel_manager"))):
+    """Phase 4: KVKK compliance overview."""
+    # PII data counts
+    total_guests = await db.guests.count_documents({})
+    total_submissions = await db.submissions.count_documents({})
+    total_audit = await db.audit_events.count_documents({})
+
+    # Access log counts (PII access events)
+    pii_access_count = await db.audit_events.count_documents({"action": "pii_access"})
+    data_export_count = await db.audit_events.count_documents({"action": "data_export_request"})
+    data_deletion_count = await db.audit_events.count_documents({"action": "data_deletion_request"})
+
+    # Retention stats
+    from datetime import timedelta
+    thirty_days_ago = (utcnow() - timedelta(days=30)).isoformat()
+    old_submissions = await db.submissions.count_documents({"created_at": {"$lte": thirty_days_ago}})
+
+    # Sensitive field inventory
+    pii_fields = [
+        {"field": "tc_kimlik_no", "collection": "guests", "classification": "Kritik / Critical", "masked_in_ui": True},
+        {"field": "passport_no", "collection": "guests", "classification": "Kritik / Critical", "masked_in_ui": True},
+        {"field": "first_name", "collection": "guests", "classification": "Kisisel / Personal", "masked_in_ui": False},
+        {"field": "last_name", "collection": "guests", "classification": "Kisisel / Personal", "masked_in_ui": False},
+        {"field": "birth_date", "collection": "guests", "classification": "Kisisel / Personal", "masked_in_ui": False},
+        {"field": "phone", "collection": "guests", "classification": "Iletisim / Contact", "masked_in_ui": False},
+        {"field": "email", "collection": "guests", "classification": "Iletisim / Contact", "masked_in_ui": False},
+        {"field": "encrypted_secret", "collection": "kbs_configs", "classification": "Gizli / Secret", "masked_in_ui": True},
+        {"field": "password_hash", "collection": "users", "classification": "Gizli / Secret", "masked_in_ui": True},
+    ]
+
+    return {
+        "data_inventory": {
+            "total_guests": total_guests,
+            "total_submissions_with_pii": total_submissions,
+            "total_audit_events": total_audit,
+            "submissions_older_than_30d": old_submissions,
+        },
+        "access_log_summary": {
+            "pii_access_count": pii_access_count,
+            "data_export_requests": data_export_count,
+            "data_deletion_requests": data_deletion_count,
+        },
+        "pii_field_inventory": pii_fields,
+        "retention_policy": {
+            "guest_data_retention_days": 365,
+            "submission_data_retention_days": 365,
+            "audit_log_retention_days": 730,
+            "credential_retention": "Otel silininceye kadar / Until hotel deletion",
+            "policy_note": "KVKK Madde 7: Kisisel veriler, islenme amacinin ortadan kalkmasi halinde silinir, yok edilir veya anonim hale getirilir."
+        },
+        "compliance_checklist": [
+            {"item": "PII maskeleme / PII masking", "status": "active", "detail": "TC Kimlik ve Pasaport numaralari UI'da maskelenmis"},
+            {"item": "Sifreleme / Encryption at rest", "status": "active", "detail": "Servis kimlik bilgileri Fernet ile sifrelenmis"},
+            {"item": "Erisim loglama / Access logging", "status": "active", "detail": "Tum PII erisim olaylari audit trail'e kaydedilir"},
+            {"item": "Veri ihracat / Data export", "status": "available", "detail": "Misafir verileri JSON formatinda ihrac edilebilir"},
+            {"item": "Veri silme / Data deletion", "status": "available", "detail": "Otel bazli veri silme islemi mevcut"},
+            {"item": "Erisim kontrolu / Access control", "status": "active", "detail": "RBAC ile rol bazli erisim kontrolu"},
+        ],
+        "timestamp": utcnow().isoformat()
+    }
+
+
+@api_router.get("/compliance/access-log")
+async def get_compliance_access_log(
+    hotel_id: str = Query(None),
+    limit: int = Query(50),
+    skip: int = Query(0),
+    user: dict = Depends(require_role("admin"))
+):
+    """Phase 4: Access log for PII data access tracking."""
+    query = {"action": {"$in": ["pii_access", "credential_access", "login_success", "login_failed", "data_export_request", "data_deletion_request"]}}
+    if hotel_id:
+        query["hotel_id"] = hotel_id
+
+    events = await db.audit_events.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+    total = await db.audit_events.count_documents(query)
+
+    return {"items": events, "total": total, "limit": limit, "skip": skip}
+
+
+@api_router.post("/compliance/export-request")
+async def request_data_export(
+    hotel_id: str = Query(...),
+    user: dict = Depends(require_role("admin", "hotel_manager"))
+):
+    """Phase 4: Request PII data export for a hotel (KVKK Article 11)."""
+    hotel = await db.hotels.find_one({"id": hotel_id})
+    if not hotel:
+        raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
+
+    # Log the export request
+    await log_audit_event(db, hotel_id, AuditAction.DATA_EXPORT_REQUEST, "hotel", hotel_id,
+                         {"requested_by": user["email"], "scope": "all_guest_data"}, actor=user["email"])
+
+    # Collect guest data (masked)
+    guests = await db.guests.find({"hotel_id": hotel_id}, {"_id": 0}).to_list(1000)
+    submissions = await db.submissions.find({"hotel_id": hotel_id}, {"_id": 0}).to_list(1000)
+
+    # Mask PII in export
+    for g in guests:
+        if g.get("tc_kimlik_no"):
+            g["tc_kimlik_no"] = g["tc_kimlik_no"][:3] + "***" + g["tc_kimlik_no"][-2:]
+        if g.get("passport_no"):
+            g["passport_no"] = g["passport_no"][:2] + "***" + g["passport_no"][-2:]
+
+    return {
+        "hotel_id": hotel_id,
+        "hotel_name": hotel.get("name"),
+        "export_timestamp": utcnow().isoformat(),
+        "requested_by": user["email"],
+        "data": {
+            "guests": [serialize_doc(g) for g in guests],
+            "submissions_count": len(submissions),
+        },
+        "note": "KVKK Madde 11: Ilgili kisi, kisisel verilerin islenip islenmedigini ogrenme ve islenmisse bilgi talep etme hakkina sahiptir."
+    }
+
+
+@api_router.post("/compliance/deletion-request")
+async def request_data_deletion(
+    hotel_id: str = Query(...),
+    user: dict = Depends(require_role("admin"))
+):
+    """Phase 4: Request PII data deletion for a hotel (KVKK Article 7)."""
+    hotel = await db.hotels.find_one({"id": hotel_id})
+    if not hotel:
+        raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
+
+    # Log the deletion request
+    await log_audit_event(db, hotel_id, AuditAction.DATA_DELETION_REQUEST, "hotel", hotel_id,
+                         {"requested_by": user["email"], "scope": "all_guest_data"}, actor=user["email"])
+
+    # Count what would be deleted
+    guest_count = await db.guests.count_documents({"hotel_id": hotel_id})
+    submission_count = await db.submissions.count_documents({"hotel_id": hotel_id})
+    checkin_count = await db.checkins.count_documents({"hotel_id": hotel_id})
+
+    return {
+        "hotel_id": hotel_id,
+        "hotel_name": hotel.get("name"),
+        "request_timestamp": utcnow().isoformat(),
+        "requested_by": user["email"],
+        "data_to_delete": {
+            "guests": guest_count,
+            "submissions": submission_count,
+            "checkins": checkin_count,
+        },
+        "status": "pending_confirmation",
+        "note": "KVKK Madde 7: Silme islemi onay sonrasi geri donusumsuz olarak uygulanacaktir. / Deletion will be irreversible after confirmation."
+    }
+
+
+@api_router.post("/compliance/deletion-confirm")
+async def confirm_data_deletion(
+    hotel_id: str = Query(...),
+    user: dict = Depends(require_role("admin"))
+):
+    """Phase 4: Confirm and execute PII data deletion for a hotel."""
+    hotel = await db.hotels.find_one({"id": hotel_id})
+    if not hotel:
+        raise HTTPException(status_code=404, detail="Otel bulunamadi / Hotel not found")
+
+    # Execute deletion
+    del_guests = await db.guests.delete_many({"hotel_id": hotel_id})
+    del_submissions = await db.submissions.delete_many({"hotel_id": hotel_id})
+    del_checkins = await db.checkins.delete_many({"hotel_id": hotel_id})
+    del_attempts = await db.attempts.delete_many({"hotel_id": hotel_id})
+
+    await log_audit_event(db, hotel_id, AuditAction.DATA_DELETION_REQUEST, "hotel", hotel_id,
+                         {"action": "deletion_confirmed", "guests_deleted": del_guests.deleted_count,
+                          "submissions_deleted": del_submissions.deleted_count}, actor=user["email"])
+
+    return {
+        "hotel_id": hotel_id,
+        "deleted": {
+            "guests": del_guests.deleted_count,
+            "submissions": del_submissions.deleted_count,
+            "checkins": del_checkins.deleted_count,
+            "attempts": del_attempts.deleted_count,
+        },
+        "timestamp": utcnow().isoformat(),
+        "note": "Veriler geri donusumsuz olarak silindi. Denetim kayitlari korunmaktadir. / Data permanently deleted. Audit records preserved."
+    }
+
+
+# ============= DEPLOYMENT GUIDE =============
+
+@api_router.get("/deployment/guide")
+async def get_deployment_guide():
+    """Phase 4: Structured deployment guide."""
+    return {
+        "architecture": {
+            "title_tr": "Sistem Mimarisi",
+            "title_en": "System Architecture",
+            "components": [
+                {
+                    "name": "Cloud Panel",
+                    "description_tr": "Merkezi yonetim paneli. Tum otellerin izlenmesi, kullanici yonetimi ve raporlama buradan yapilir.",
+                    "description_en": "Central management panel. All hotel monitoring, user management and reporting is done here.",
+                    "deployment": "Cloud (Azure/AWS/GCP)",
+                    "tech": "FastAPI + React + MongoDB"
+                },
+                {
+                    "name": "Bridge Agent",
+                    "description_tr": "Her otelde yerel olarak calisir. KBS SOAP baglantisini gerceklestirir. Sabit IP uzerinden iletisim kurar.",
+                    "description_en": "Runs locally at each hotel. Performs KBS SOAP connection. Communicates over static IP.",
+                    "deployment": "On-premise (Windows/Linux service)",
+                    "tech": "Python service + SOAP client"
+                },
+                {
+                    "name": "KBS Endpoint",
+                    "description_tr": "EGM veya Jandarma KBS SOAP servisi. Resmi devlet altyapisi.",
+                    "description_en": "EGM or Jandarma KBS SOAP service. Official government infrastructure.",
+                    "deployment": "Government hosted",
+                    "tech": "SOAP/XML Web Service"
+                }
+            ]
+        },
+        "agent_installation": {
+            "title_tr": "Agent Kurulum Rehberi",
+            "title_en": "Agent Installation Guide",
+            "steps": [
+                {"step": 1, "tr": "Otel sunucusuna Python 3.10+ yukleyin", "en": "Install Python 3.10+ on hotel server"},
+                {"step": 2, "tr": "Agent paketini indirin ve kurun: pip install kbs-bridge-agent", "en": "Download and install agent package: pip install kbs-bridge-agent"},
+                {"step": 3, "tr": "Yapilandirma dosyasini (/etc/kbs-agent/config.yaml) duzenleyin", "en": "Edit configuration file (/etc/kbs-agent/config.yaml)"},
+                {"step": 4, "tr": "Servisi baslatip otomatik baslangica ekleyin (systemd/Windows service)", "en": "Start service and enable auto-start (systemd/Windows service)"},
+                {"step": 5, "tr": "Cloud panel uzerinden agent durumunu dogrulayin", "en": "Verify agent status from cloud panel"},
+            ],
+            "config_template": {
+                "cloud_panel_url": "https://kbs-bridge.example.com",
+                "hotel_id": "<OTEL_ID>",
+                "api_key": "<AGENT_API_KEY>",
+                "kbs_endpoint": "https://kbs.egm.gov.tr/KBSServis.asmx",
+                "heartbeat_interval": 15,
+                "queue_poll_interval": 5,
+                "max_retries": 5,
+                "log_level": "INFO"
+            }
+        },
+        "network_requirements": {
+            "title_tr": "Ag Gereksinimleri",
+            "title_en": "Network Requirements",
+            "items": [
+                {"tr": "Sabit IP adresi (EGM/Jandarma whitelist icin zorunlu)", "en": "Static IP address (required for EGM/Jandarma whitelist)"},
+                {"tr": "HTTPS 443 port erisimi (cloud panel icin)", "en": "HTTPS port 443 access (for cloud panel)"},
+                {"tr": "KBS endpoint erisimi (EGM: kbs.egm.gov.tr / Jandarma: ilgili endpoint)", "en": "KBS endpoint access (EGM: kbs.egm.gov.tr / Jandarma: relevant endpoint)"},
+                {"tr": "Firewall kurallari: sadece gerekli portlar acik", "en": "Firewall rules: only required ports open"},
+                {"tr": "DNS cozumleme: KBS ve cloud panel domainleri", "en": "DNS resolution: KBS and cloud panel domains"},
+            ]
+        },
+        "credential_vault": {
+            "title_tr": "Kimlik Bilgisi Kasasi",
+            "title_en": "Credential Vault Protection",
+            "items": [
+                {"tr": "Servis kimlik bilgileri Fernet simetrik sifreleme ile korunur", "en": "Service credentials protected with Fernet symmetric encryption"},
+                {"tr": "Sifreleme anahtari sunucu ortam degiskeninde saklanir", "en": "Encryption key stored in server environment variable"},
+                {"tr": "API yanitlarinda sifreler her zaman maskelenir", "en": "Passwords always masked in API responses"},
+                {"tr": "e-Devlet sifreleri ASLA sistemde saklanmaz", "en": "e-Devlet passwords are NEVER stored in the system"},
+            ]
+        },
+        "environment_separation": {
+            "title_tr": "Ortam Ayirimi",
+            "title_en": "Environment Separation",
+            "environments": [
+                {
+                    "name": "Test",
+                    "tr": "KBS simulatoru ile entegrasyon testleri. Gercek veri gondermez.",
+                    "en": "Integration tests with KBS simulator. Does not send real data.",
+                    "config": {"kbs_endpoint": "internal_simulator", "mode": "test"}
+                },
+                {
+                    "name": "Staging",
+                    "tr": "EGM/Jandarma test ortamina baglanti. Gercek SOAP ama test verileri.",
+                    "en": "Connection to EGM/Jandarma test environment. Real SOAP but test data.",
+                    "config": {"kbs_endpoint": "egm_test_endpoint", "mode": "staging"}
+                },
+                {
+                    "name": "Production",
+                    "tr": "Canli KBS baglantisi. Gercek kimlik bildirimleri.",
+                    "en": "Live KBS connection. Real identity notifications.",
+                    "config": {"kbs_endpoint": "kbs.egm.gov.tr", "mode": "production"}
+                }
+            ]
+        },
+        "per_hotel_config": {
+            "title_tr": "Otel Bazli Yapilandirma Dagitimi",
+            "title_en": "Per-Hotel Configuration Distribution",
+            "items": [
+                {"tr": "Her otel icin benzersiz hotel_id ve api_key uretilir", "en": "Unique hotel_id and api_key generated for each hotel"},
+                {"tr": "Onboarding sihirbazi uzerinden yapilandirma tamamlanir", "en": "Configuration completed through onboarding wizard"},
+                {"tr": "Agent config dosyasi cloud panelden indirilebilir", "en": "Agent config file downloadable from cloud panel"},
+                {"tr": "Yapilandirma degisiklikleri agent restart gerektirir", "en": "Configuration changes require agent restart"},
+            ]
+        }
+    }
 
 
 # ============= UTILITY =============

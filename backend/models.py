@@ -61,6 +61,13 @@ class AuditAction(str, Enum):
     AGENT_HEARTBEAT = "agent_heartbeat"
     AGENT_OFFLINE = "agent_offline"
     AGENT_ONLINE = "agent_online"
+    # Phase 4: KVKK & Compliance
+    PII_ACCESS = "pii_access"
+    DATA_EXPORT_REQUEST = "data_export_request"
+    DATA_DELETION_REQUEST = "data_deletion_request"
+    CREDENTIAL_ACCESS = "credential_access"
+    LOGIN_SUCCESS = "login_success"
+    LOGIN_FAILED = "login_failed"
 
 
 # ============= MODELS =============

@@ -83,6 +83,22 @@ export const getAuditStats = (hotelId) => api.get('/audit/stats', { params: { ho
 // ============= METRICS =============
 export const getMetrics = (hotelId) => api.get('/metrics', { params: { hotel_id: hotelId } }).then(r => r.data);
 
+// ============= OBSERVABILITY =============
+export const getObservability = (hotelId) => api.get('/observability', { params: { hotel_id: hotelId } }).then(r => r.data);
+
+// ============= GO-LIVE CHECKLIST =============
+export const getGoLiveChecklist = (hotelId) => api.get(`/hotels/${hotelId}/go-live-checklist`).then(r => r.data);
+
+// ============= COMPLIANCE / KVKK =============
+export const getComplianceStatus = () => api.get('/compliance/status').then(r => r.data);
+export const getComplianceAccessLog = (params) => api.get('/compliance/access-log', { params }).then(r => r.data);
+export const requestDataExport = (hotelId) => api.post('/compliance/export-request', null, { params: { hotel_id: hotelId } }).then(r => r.data);
+export const requestDataDeletion = (hotelId) => api.post('/compliance/deletion-request', null, { params: { hotel_id: hotelId } }).then(r => r.data);
+export const confirmDataDeletion = (hotelId) => api.post('/compliance/deletion-confirm', null, { params: { hotel_id: hotelId } }).then(r => r.data);
+
+// ============= DEPLOYMENT =============
+export const getDeploymentGuide = () => api.get('/deployment/guide').then(r => r.data);
+
 // ============= HEALTH =============
 export const getHealth = () => api.get('/health').then(r => r.data);
 

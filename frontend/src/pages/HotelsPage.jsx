@@ -16,7 +16,7 @@ import { ScrollArea } from '../components/ui/scroll-area';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { toast } from 'sonner';
 import {
-  Building2, Plus, RefreshCw, MapPin, Settings, Heart
+  Building2, Plus, RefreshCw, MapPin, Settings, Heart, ClipboardCheck
 } from 'lucide-react';
 
 const ONBOARDING_STATUS_BADGES = {
@@ -186,6 +186,16 @@ export default function HotelsPage() {
                               title={language === 'tr' ? 'Saglik Paneli' : 'Health Panel'}
                             >
                               <Heart className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => navigate(`/hotels/${hotel.id}/go-live`)}
+                              data-testid={`hotel-golive-${hotel.id}`}
+                              title={language === 'tr' ? 'Go-Live Kontrol' : 'Go-Live Checklist'}
+                            >
+                              <ClipboardCheck className="h-3.5 w-3.5" />
                             </Button>
                           </div>
                         </TableCell>

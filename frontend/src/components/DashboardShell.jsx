@@ -9,7 +9,7 @@ import { Badge } from './ui/badge';
 import {
   LayoutDashboard, UserPlus, Send, Activity, Radio, FileText,
   Building2, Globe, Menu, X, ChevronRight, LogOut, Users, Settings,
-  Heart
+  Heart, BarChart3, Shield, BookOpen
 } from 'lucide-react';
 
 const ROLE_LABELS = {
@@ -23,6 +23,7 @@ const navGroups = (t, role) => {
       label: t('nav.overview'),
       items: [
         { path: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
+        { path: '/observability', icon: BarChart3, label: t('observability.title') || 'Observability' },
       ]
     },
     {
@@ -43,12 +44,14 @@ const navGroups = (t, role) => {
       label: t('nav.compliance'),
       items: [
         { path: '/audit', icon: FileText, label: t('nav.audit') },
+        { path: '/compliance', icon: Shield, label: t('kvkk.title') || 'KVKK' },
       ]
     },
     {
       label: t('nav.admin'),
       items: [
         { path: '/hotels', icon: Building2, label: t('nav.hotels') },
+        { path: '/deployment', icon: BookOpen, label: t('deployment.title') || 'Deployment' },
       ]
     }
   ];
@@ -60,9 +63,16 @@ const navGroups = (t, role) => {
     );
   }
 
-  // For front_desk, remove monitoring and compliance sections
+  // For front_desk, remove monitoring, compliance and admin sections
   if (role === 'front_desk') {
-    return groups.filter(g => g.label !== t('nav.monitoring') && g.label !== t('nav.admin'));
+    return groups.filter(g =>
+      g.label !== t('nav.monitoring') &&
+      g.label !== t('nav.admin') &&
+      g.label !== t('nav.compliance')
+    ).map(g => ({
+      ...g,
+      items: g.items.filter(i => i.path !== '/observability')
+    }));
   }
 
   return groups;

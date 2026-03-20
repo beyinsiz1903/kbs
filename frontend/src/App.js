@@ -16,6 +16,10 @@ import HotelsPage from './pages/HotelsPage';
 import HotelOnboardingPage from './pages/HotelOnboardingPage';
 import HotelHealthPage from './pages/HotelHealthPage';
 import UsersPage from './pages/UsersPage';
+import ObservabilityPage from './pages/ObservabilityPage';
+import GoLiveChecklistPage from './pages/GoLiveChecklistPage';
+import CompliancePage from './pages/CompliancePage';
+import DeploymentGuidePage from './pages/DeploymentGuidePage';
 import './App.css';
 
 function ProtectedRoute({ children, requiredRoles }) {
@@ -73,6 +77,18 @@ function AppRoutes() {
         <Route path="/hotels" element={<HotelsPage />} />
         <Route path="/hotels/:id/onboarding" element={<HotelOnboardingPage />} />
         <Route path="/hotels/:id/health" element={<HotelHealthPage />} />
+        <Route path="/hotels/:id/go-live" element={<GoLiveChecklistPage />} />
+        <Route path="/observability" element={
+          <ProtectedRoute requiredRoles={['admin', 'hotel_manager']}>
+            <ObservabilityPage />
+          </ProtectedRoute>
+        } />
+        <Route path="/compliance" element={
+          <ProtectedRoute requiredRoles={['admin', 'hotel_manager']}>
+            <CompliancePage />
+          </ProtectedRoute>
+        } />
+        <Route path="/deployment" element={<DeploymentGuidePage />} />
         <Route path="/users" element={
           <ProtectedRoute requiredRoles={['admin']}>
             <UsersPage />
