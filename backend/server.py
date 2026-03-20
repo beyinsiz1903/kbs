@@ -136,12 +136,23 @@ async def health_check():
 async def login(request: LoginRequest):
     """Authenticate user and return JWT token."""
     user = await db.users.find_one({"email": request.email, "is_active": True})
-    if not user or not verify_password(request.password, user["password_hash"]):
+    if not user:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=401,
             detail="Gecersiz e-posta veya sifre / Invalid email or password"
         )
     
+    try:
+        if not verify_password(request.password, user.get("password_hash", "")):
+            raise HTTPException(
+                status_code=401,
+                detail="Gecersiz e-posta veya sifre / Invalid email or password"
+            )
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Gecersiz e-posta veya sifre / Invalid email or password"
+        )
     token = create_access_token(
         user_id=user["id"],
         email=user["email"],
