@@ -66,13 +66,8 @@ webpackConfig.devServer = (devServerConfig) => {
   devServerConfig.host = "0.0.0.0";
   devServerConfig.port = 5000;
 
-  // Proxy API requests to the backend
-  devServerConfig.proxy = {
-    "/api": {
-      target: "http://localhost:8000",
-      changeOrigin: true,
-    }
-  };
+  // Proxy is configured in src/setupProxy.js (CRA auto-loads it).
+  // Defining proxy here as well caused POST requests to hang in webpack-dev-server.
 
   // Add health check endpoints if enabled
   if (config.enableHealthCheck && setupHealthEndpoints && healthPluginInstance) {
