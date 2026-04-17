@@ -1,28 +1,17 @@
 services:
-  mongo:
-    image: mongo:7
-    container_name: kbs_mongo
-    restart: unless-stopped
-    volumes:
-      - mongo_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   backend:
     build: ./backend
     container_name: kbs_backend
     restart: unless-stopped
-    depends_on:
-      mongo:
-        condition: service_healthy
     environment:
-      MONGO_URL: mongodb://mongo:27017
-      DB_NAME: kbs_bridge_system
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-degistirin-bu-anahtari-uretimde-2024}
+      # Bir kerelik uretmek icin:
+      # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      SESSION_ENCRYPTION_KEY: ${SESSION_ENCRYPTION_KEY:?SESSION_ENCRYPTION_KEY env variable zorunlu}
+      KBS_MODE: ${KBS_MODE:-simulation}
+      DATA_DIR: /data
       CORS_ORIGINS: "*"
+    volumes:
+      - kbs_data:/data
     expose:
       - "8000"
 
@@ -36,4 +25,4 @@ services:
       - "5000:80"
 
 volumes:
-  mongo_data:
+  kbs_data:

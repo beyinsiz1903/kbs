@@ -1,29 +1,35 @@
 #!/bin/bash
-# Start MongoDB if not running
-mkdir -p /tmp/mongodb_data
-if ! pgrep -x "mongod" > /dev/null; then
-    mongod --dbpath /tmp/mongodb_data --fork --logpath /tmp/mongod.log --port 27017
-    echo "MongoDB started"
-    sleep 2
-else
-    echo "MongoDB already running"
+# Dev runner: backend (FastAPI) + frontend (CRA) — NO MongoDB.
+# Production icin docker-compose.yml kullanin.
+
+set -e
+
+# Local dev data directory (Fernet-encrypted session storage)
+export DATA_DIR="${DATA_DIR:-$PWD/.devdata}"
+mkdir -p "$DATA_DIR"
+
+# Generate a per-dev Fernet key once and persist it
+KEY_FILE="$DATA_DIR/.devkey"
+if [ -z "${SESSION_ENCRYPTION_KEY:-}" ]; then
+  if [ ! -f "$KEY_FILE" ]; then
+    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > "$KEY_FILE"
+    chmod 600 "$KEY_FILE"
+  fi
+  export SESSION_ENCRYPTION_KEY="$(cat "$KEY_FILE")"
 fi
 
-# Start backend in background
-cd backend
-export MONGO_URL="${MONGO_URL:-mongodb://localhost:27017}"
-export DB_NAME="${DB_NAME:-kbs_bridge_system}"
-export JWT_SECRET_KEY="${JWT_SECRET_KEY:-kbs_bridge_secret_key_2024}"
+export KBS_MODE="${KBS_MODE:-simulation}"
 
-# Clean up any stale uvicorn processes on port 8000
+# Clean stale uvicorn
 pkill -f "uvicorn server:app" 2>/dev/null || true
 sleep 1
 
-uvicorn server:app --host localhost --port 8000 &
+# Start backend
+(cd backend && uvicorn server:app --host localhost --port 8000) &
 BACKEND_PID=$!
-echo "Backend started with PID $BACKEND_PID"
+echo "Backend PID=$BACKEND_PID  DATA_DIR=$DATA_DIR  KBS_MODE=$KBS_MODE"
 sleep 3
 
-# Start frontend
-cd ../frontend
+# Start frontend (CRA dev server) on 5000
+cd frontend
 PORT=5000 HOST=0.0.0.0 npm start
