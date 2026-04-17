@@ -1,0 +1,20 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "apscheduler>=3.11.2",
+    "bcrypt>=5.0.0",
+    "cryptography>=46.0.7",
+    "email-validator>=2.3.0",
+    "fastapi>=0.136.0",
+    "motor>=3.7.1",
+    "pydantic>=2.13.1",
+    "pyjwt>=2.12.1",
+    "pymongo>=4.16.0",
+    "python-dotenv>=1.2.2",
+    "python-jose>=3.5.0",
+    "python-multipart>=0.0.26",
+    "uvicorn>=0.44.0",
+]
