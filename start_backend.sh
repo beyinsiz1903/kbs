@@ -13,5 +13,5 @@ fi
 cd backend
 export MONGO_URL="${MONGO_URL:-mongodb://localhost:27017}"
 export DB_NAME="${DB_NAME:-kbs_bridge_system}"
-export JWT_SECRET="${JWT_SECRET:-kbs_bridge_secret_key_2024}"
+export JWT_SECRET_KEY="${JWT_SECRET_KEY:-kbs_bridge_secret_key_2024}"
 uvicorn server:app --host localhost --port 8000 --reload

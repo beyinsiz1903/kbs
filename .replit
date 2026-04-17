@@ -11,8 +11,8 @@ packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc"]
 [userenv.shared]
 MONGO_URL = "mongodb://localhost:27017"
 DB_NAME = "kbs_bridge_system"
-JWT_SECRET = "kbs_bridge_secret_key_2024"
 REACT_APP_BACKEND_URL = ""
+JWT_SECRET_KEY = "kbs_bridge_secret_key_2024"
 
 [workflows]
 runButton = "Project"
@@ -45,6 +45,7 @@ externalPort = 5000
 [[ports]]
 localPort = 8000
 externalPort = 80
+exposeLocalhost = true
 
 [deployment]
 deploymentTarget = "autoscale"
