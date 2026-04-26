@@ -79,7 +79,8 @@ izler ve ayarları yönetir.
 | Dosya | Görev |
 |---|---|
 | `server.py` | FastAPI; route'lar: `/api/auth/*`, `/api/settings`, `/api/worker/status`, `/api/worker/poll-now` |
-| `worker.py` | Otonom polling task (asyncio). FastAPI startup'ta başlar, shutdown'da temiz kapanır |
+| `worker.py` | Otonom polling task (asyncio). FastAPI startup'ta başlar, shutdown'da temiz kapanır. `WORKER_MODE` ile `poll`/`sse`/`auto` arasında geçiş |
+| `sse_client.py` | PMS `/api/kbs/queue/stream` SSE istemcisi (`httpx-sse`); `Authorization: Bearer` + `Last-Event-ID` resume desteği |
 | `session.py` | Fernet ile `/data/.session.enc` ve `/data/settings.json` yönetimi |
 | `pms_client.py` | Syroce PMS v1 KBS Agent contract istemcisi (login, me, queue list/claim/complete/fail) — `idem_key` kwarg destekli |
 | `kbs_client.py` | KBS web servisi göndericisi. **Şu an simülasyon** (`KBS_MODE=simulation`); Phase B'de gerçek SOAP |
@@ -124,6 +125,7 @@ izler ve ayarları yönetir.
 | `KBS_MODE` | hayır | `simulation` (varsayılan) veya `real` (Phase B) |
 | `DATA_DIR` | hayır | Varsayılan `/data`, dev'de `./.devdata` |
 | `POLL_INTERVAL` | hayır | Saniye, varsayılan 15 |
+| `WORKER_MODE` | hayır | `poll` (varsayılan) / `sse` / `auto`. `sse` ve `auto` PMS'in `/api/kbs/queue/stream` SSE endpoint'ine bağlanır; her `new_job` event'inde polling tetiklenir. `auto` 3 ardışık SSE başarısızlığında poll'a düşer |
 | `CORS_ORIGINS` | hayır | Varsayılan `http://localhost:5000` |
 | `PUBLIC_HOSTNAME` | hayır | Self-host engellemek için (opsiyonel) |
 
@@ -144,7 +146,7 @@ docker compose up -d
 ```bash
 uv run pytest tests/ -q
 ```
-68 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op).
+115 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op + Phase D: multi-agent atomik claim + SSE client/supervisor).
 
 ## Faz Planı
 
@@ -180,7 +182,16 @@ uv run pytest tests/ -q
   - ✅ `requirements.txt` — Windows-only deps `; sys_platform == 'win32'` marker'ı ile.
   - ✅ Sızdırılmış `.devdata/.devkey` git'ten temizlendi; README'ye rotasyon uyarısı.
   - ⏳ Gerçek `.exe` build + Windows servis testi otelci PC'sinde yapılmalı (Replit'te imkansız).
-- **Phase D (PENDING):** Çoklu ajan koordinasyonu, opsiyonel SSE.
+- **Phase D (PARÇALI):**
+  - ✅ Çoklu ajan koordinasyonu (worker_id MAC slug + `other_workers` paneli + atomik claim testleri).
+  - ✅ SSE push kanalı (`backend/sse_client.py` + `worker._sse_supervisor`):
+    `WORKER_MODE=sse|auto` ile `/api/kbs/queue/stream` dinlenir; her `new_job`
+    event'i `poll_now`'u tetikler — claim/idem/journal akışı poll'la birebir aynı
+    kalır. Reconnect 1s→2s→4s→8s→16s→30s exp backoff. `auto` 3 ardışık başarısızlıkta
+    60s idle'a düşer (poll loop yedek). 401/403 → oturum temizlenir.
+  - ⏳ **Bekleniyor (PMS ekibi):** `/api/kbs/queue/stream` endpoint'inin canlı PMS'te yayına alınması.
+    Ajan tarafı hazır; sözleşme: `event: new_job\ndata: {"job_id":"...","tenant_id":"..."}`,
+    `Authorization: Bearer <token>`, opsiyonel `Last-Event-ID` resume, `event: heartbeat` keep-alive.
 
 ## Tasarım Kararları
 

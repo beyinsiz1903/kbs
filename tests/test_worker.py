@@ -25,6 +25,17 @@ async def test_state_to_dict_shape(_isolated_data_dir):
     assert {"worker_id", "running", "poll_interval", "session_status",
             "queue_stats", "counters", "recent_jobs"} <= set(s.keys())
     assert s["counters"] == {"claim": 0, "complete": 0, "fail": 0, "replay": 0}
+    # Flat SSE field aliases (task-7 contract) — must exist alongside nested.
+    assert "sse_connected" in s and s["sse_connected"] is False
+    assert "sse_last_event_at" in s and s["sse_last_event_at"] is None
+    assert "sse_reconnect_count" in s and s["sse_reconnect_count"] == 0
+    assert "sse" in s and set(s["sse"].keys()) == {
+        "connected", "last_event_at", "reconnect_count", "consecutive_failures",
+    }
+    # Flat and nested views must agree.
+    assert s["sse_connected"] == s["sse"]["connected"]
+    assert s["sse_last_event_at"] == s["sse"]["last_event_at"]
+    assert s["sse_reconnect_count"] == s["sse"]["reconnect_count"]
 
 
 def _save_session(monkeypatch):

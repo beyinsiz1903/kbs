@@ -1,7 +1,7 @@
 """Phase D — WORKER_MODE policy.
 
-`poll` (default) and `auto` start normally. `sse` is reserved for a future
-PMS push endpoint and refuses loudly. Anything else also refuses.
+`poll` (default), `sse`, and `auto` all start normally. Anything else refuses.
+SSE-specific behavior is covered in test_sse_client.py and test_sse_worker.py.
 """
 import asyncio
 
@@ -37,7 +37,7 @@ async def test_poll_mode_starts(_reset, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_auto_mode_starts(_reset, monkeypatch):
-    """`auto` should fall back to poll until SSE is available."""
+    """`auto` runs the poll loop AND tries SSE in parallel."""
     monkeypatch.setenv("WORKER_MODE", "auto")
     started = asyncio.Event()
 
@@ -51,18 +51,21 @@ async def test_auto_mode_starts(_reset, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sse_mode_refuses(_reset, monkeypatch):
+async def test_sse_mode_starts(_reset, monkeypatch):
+    """`sse` is now supported — supervisor runs alongside the poll loop."""
     monkeypatch.setenv("WORKER_MODE", "sse")
     monkeypatch.setenv("KBS_MODE", "simulation")
+    started = asyncio.Event()
 
-    async def fake_loop(state, stop, poll_now):  # pragma: no cover - should not start
-        raise AssertionError("loop must NOT start in sse mode")
+    async def fake_loop(state, stop, poll_now):
+        started.set()
+        await stop.wait()
 
     worker.start(loop_factory=fake_loop)
     state = worker.get_state()
-    assert state.session_status == "refused"
-    assert state.running is False
-    assert "WORKER_MODE=sse henuz desteklenmiyor" in (state.last_error or "")
+    assert state.session_status != "refused"
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await worker.stop()
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
+
 from kbs_client import (
     KBSConfigError,
     KBSFatalError,
@@ -46,6 +48,7 @@ from pms_client import (
 import idem
 import journal
 import eventlog
+import sse_client
 from session import DATA_DIR, clear_session, load_session
 
 log = logging.getLogger("kbs-bridge.worker")
@@ -158,6 +161,15 @@ class WorkerState:
         # Track which session token we already replayed for so we don't
         # re-scan the journal every poll.
         self._last_replayed_token: Optional[str] = None
+        # Phase D follow-up: SSE push channel state.
+        # `sse_connected` reflects whether the supervisor currently holds a
+        # live stream. `sse_last_event_at` is updated on every event including
+        # heartbeats so the operator can see "stream is alive". `auto` mode
+        # uses `sse_consecutive_failures` to decide when to fall back.
+        self.sse_connected: bool = False
+        self.sse_last_event_at: Optional[str] = None
+        self.sse_reconnect_count: int = 0
+        self.sse_consecutive_failures: int = 0
 
     def record_recent(self, job_id: str, action: str, outcome: str, detail: str = "") -> None:
         self.recent_jobs.insert(0, {
@@ -190,6 +202,21 @@ class WorkerState:
             },
             "recent_jobs": self.recent_jobs,
             "other_workers": self.other_workers,
+            # Flat fields — match the contract in task-7.md so external
+            # consumers (status UI, ops dashboards) get the exact names
+            # they expect without having to dig into a nested object.
+            "sse_connected": self.sse_connected,
+            "sse_last_event_at": self.sse_last_event_at,
+            "sse_reconnect_count": self.sse_reconnect_count,
+            # Nested copy retained for grouping in newer dashboards. Both
+            # views read from the same WorkerState fields, so they cannot
+            # drift.
+            "sse": {
+                "connected": self.sse_connected,
+                "last_event_at": self.sse_last_event_at,
+                "reconnect_count": self.sse_reconnect_count,
+                "consecutive_failures": self.sse_consecutive_failures,
+            },
         }
 
 
@@ -593,6 +620,147 @@ async def _poll_once(state: WorkerState) -> None:
             log.exception("Job islerken beklenmeyen hata: %s", job.get("id"))
 
 
+async def _sleep_with_stop(stop: asyncio.Event, timeout: float) -> None:
+    """Sleep up to `timeout` seconds, returning early if stop is set.
+
+    Used by the SSE supervisor between reconnect attempts. Cancels the wait
+    task on early return so we don't accumulate orphaned coroutines on long
+    uptimes (same hygiene as `_sleep_until_event_or_timeout`).
+    """
+    if stop.is_set() or timeout <= 0:
+        return
+    stop_task = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait({stop_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if not stop_task.done():
+            stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
+
+
+# ---------- SSE supervisor (Phase D follow-up) ----------
+
+# Backoff schedule for SSE reconnect: 1s, 2s, 4s, 8s, 16s, then capped at 30s.
+SSE_BACKOFF_INITIAL = 1.0
+SSE_BACKOFF_MAX = 30.0
+
+# In `auto` mode, after this many consecutive failures we stop hammering the
+# SSE endpoint with backoff and instead idle for SSE_AUTO_RETRY_INTERVAL
+# seconds before trying again. The poll loop keeps running the whole time —
+# the operator never loses jobs, they just wait up to POLL_INTERVAL seconds.
+SSE_AUTO_FAILURE_THRESHOLD = 3
+SSE_AUTO_RETRY_INTERVAL = 60.0
+
+
+async def _sse_supervisor(
+    state: WorkerState, stop: asyncio.Event, poll_now: asyncio.Event,
+    open_stream=sse_client.open_stream,
+) -> None:
+    """Maintain a long-lived SSE connection; trigger poll_now on each event.
+
+    Reconnect policy:
+      - Successful connect resets backoff to 1s and `sse_consecutive_failures`
+        to 0.
+      - Each failure (connect refused, mid-stream EOF, auth, parse) increments
+        the counter and waits backoff = min(prev * 2, 30s).
+      - In `auto` mode, after SSE_AUTO_FAILURE_THRESHOLD consecutive failures
+        we wait SSE_AUTO_RETRY_INTERVAL instead of the short backoff. The
+        poll loop running in parallel keeps the operator covered.
+
+    Auth errors clear the session (matches the polling loop's 401 behavior),
+    then the supervisor idles until `stop` or a new session appears.
+
+    `open_stream` is a parameter so tests can swap in a fake without monkey-
+    patching module globals.
+    """
+    log.info("SSE supervisor started (mode=%s)", state.worker_mode)
+    backoff = SSE_BACKOFF_INITIAL
+    last_event_id: Optional[str] = None
+
+    try:
+        while not stop.is_set():
+            sess = load_session()
+            token = (sess or {}).get("access_token")
+            pms_url = (sess or {}).get("pms_url")
+            if not sess or not token or not pms_url:
+                # No session yet — wait politely; login handler will eventually
+                # populate it. We don't count "no session" as a failure.
+                await _sleep_with_stop(stop, 5.0)
+                continue
+
+            try:
+                async with open_stream(pms_url, token, last_event_id=last_event_id) as events:
+                    state.sse_connected = True
+                    state.sse_consecutive_failures = 0
+                    backoff = SSE_BACKOFF_INITIAL
+                    log.info("SSE connected to %s", pms_url)
+                    async for ev in events:
+                        if stop.is_set():
+                            break
+                        state.sse_last_event_at = datetime.now(timezone.utc).isoformat()
+                        if ev.id:
+                            last_event_id = ev.id
+                        ev_type = (ev.event or "message").lower()
+                        if ev_type == "new_job":
+                            # The actual claim/process flow runs in the poll
+                            # loop — we just wake it up. This keeps idempotency,
+                            # atomic claim semantics, and journal replay
+                            # identical between poll and SSE modes.
+                            poll_now.set()
+                        elif ev_type in ("heartbeat", "ping"):
+                            # Server keep-alive — already updated last_event_at.
+                            pass
+                        elif ev_type == "lease_expired":
+                            # Future PMS event: a sibling lost its lease; wake
+                            # poll so we can grab the freed job quickly.
+                            poll_now.set()
+                        else:
+                            log.debug("SSE bilinmeyen event: %s", ev_type)
+            except sse_client.SSEAuthError as e:
+                log.warning("SSE auth hatasi (%s) — oturum temizleniyor", e)
+                state.sse_connected = False
+                clear_session()
+                state.session_status = "invalid"
+                state.last_error = "SSE 401/403: oturum gecersiz"
+                # Don't burn backoff on a missing session — the next loop
+                # iteration will hit the `not sess` branch and idle on 5s.
+                continue
+            except asyncio.CancelledError:
+                raise
+            except (sse_client.SSEConnectError, httpx.RequestError, Exception) as e:
+                # Mid-stream errors arrive here too (httpx.RemoteProtocolError,
+                # ReadError, ConnectionResetError). We never want the
+                # supervisor to die — log and back off.
+                log.warning("SSE baglanti koptu/hata: %s", e.__class__.__name__)
+            finally:
+                if state.sse_connected:
+                    state.sse_connected = False
+                    state.sse_reconnect_count += 1
+
+            state.sse_consecutive_failures += 1
+            if (
+                state.worker_mode == "auto"
+                and state.sse_consecutive_failures >= SSE_AUTO_FAILURE_THRESHOLD
+            ):
+                # Auto mode: stop pestering the endpoint; rely on poll loop.
+                # Try again after a longer idle so a recovered PMS still gets
+                # the SSE benefit eventually.
+                log.info(
+                    "SSE auto fallback: %d ardisik basarisizlik, %ss bekle",
+                    state.sse_consecutive_failures, int(SSE_AUTO_RETRY_INTERVAL),
+                )
+                await _sleep_with_stop(stop, SSE_AUTO_RETRY_INTERVAL)
+                # Reset so we get a fresh fast-retry cycle on the next attempt.
+                state.sse_consecutive_failures = 0
+                backoff = SSE_BACKOFF_INITIAL
+            else:
+                await _sleep_with_stop(stop, backoff)
+                backoff = min(backoff * 2, SSE_BACKOFF_MAX)
+    finally:
+        state.sse_connected = False
+        log.info("SSE supervisor stopped")
+
+
 async def _sleep_until_event_or_timeout(
     stop: asyncio.Event, poll_now: asyncio.Event, timeout: float
 ) -> None:
@@ -620,10 +788,25 @@ async def _sleep_until_event_or_timeout(
 
 async def _loop(state: WorkerState, stop: asyncio.Event, poll_now: asyncio.Event) -> None:
     log.info(
-        "worker started: %s polling every %ds", state.worker_id, state.poll_interval
+        "worker started: %s mode=%s polling every %ds",
+        state.worker_id, state.worker_mode, state.poll_interval,
     )
     state.started_at = datetime.now(timezone.utc).isoformat()
     state.running = True
+
+    # In `sse` and `auto` modes we run a long-lived SSE supervisor alongside
+    # the poll loop. SSE events fire `poll_now`; the actual claim/process
+    # flow stays in the poll loop so idempotency, atomic claim semantics,
+    # and journal replay are identical between modes (no SSE-only code path
+    # to drift). In `sse` mode the poll loop also runs as a safety net at
+    # the configured interval — if SSE silently drops or misses an event,
+    # the operator never loses jobs, just up to POLL_INTERVAL of latency.
+    sse_task: Optional[asyncio.Task] = None
+    if state.worker_mode in ("sse", "auto"):
+        sse_task = asyncio.create_task(
+            _sse_supervisor(state, stop, poll_now), name="sse-supervisor",
+        )
+
     try:
         while not stop.is_set():
             # Consume any prior poll-now trigger so it fires at most once per cycle.
@@ -637,6 +820,9 @@ async def _loop(state: WorkerState, stop: asyncio.Event, poll_now: asyncio.Event
 
             await _sleep_until_event_or_timeout(stop, poll_now, state.poll_interval)
     finally:
+        if sse_task is not None and not sse_task.done():
+            sse_task.cancel()
+            await asyncio.gather(sse_task, return_exceptions=True)
         state.running = False
         log.info("worker stopped: %s", state.worker_id)
 
@@ -666,20 +852,12 @@ def start(loop_factory=_loop) -> None:
             log.error(state.last_error)
             return
 
-    # Phase D: WORKER_MODE refusal. The 'sse' mode is reserved for a future
-    # PMS push endpoint that hasn't been confirmed yet — refuse loudly so an
-    # operator setting WORKER_MODE=sse doesn't silently get poll behavior.
-    if state.worker_mode == "sse":
-        state.session_status = "refused"
-        state.running = False
-        state.last_error = (
-            "WORKER_MODE=sse henuz desteklenmiyor. PMS ekibi "
-            "/api/kbs/queue/stream endpoint'ini yayina aldiktan sonra aktive "
-            "edilecek (Faz D follow-up). Simdilik WORKER_MODE=poll kullanin."
-        )
-        log.error(state.last_error)
-        return
-    if state.worker_mode not in ("poll", "auto"):
+    # Phase D follow-up: SSE is now wired. Valid modes:
+    #   poll  — classic 15s polling (no SSE supervisor)
+    #   sse   — SSE supervisor + safety-net poll at POLL_INTERVAL
+    #   auto  — same as sse, but after 3 consecutive SSE failures the
+    #           supervisor idles longer and relies on poll to drain the queue
+    if state.worker_mode not in ("poll", "sse", "auto"):
         state.session_status = "refused"
         state.running = False
         state.last_error = (
