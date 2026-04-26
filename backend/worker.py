@@ -33,6 +33,7 @@ from kbs_client import (
     KBSConfigError,
     KBSFatalError,
     KBSRetryableError,
+    is_real_ready,
     submit_guest,
 )
 from pms_client import (
@@ -42,6 +43,7 @@ from pms_client import (
     fail_job,
     list_queue,
 )
+import idem
 import journal
 from session import DATA_DIR, clear_session, load_session
 
@@ -50,6 +52,26 @@ log = logging.getLogger("kbs-bridge.worker")
 POLL_INTERVAL_DEFAULT = 15  # seconds
 LEASE_SECONDS = 300  # 5 minutes
 WORKER_ID_FILE = DATA_DIR / "worker_id"
+
+# Required env vars when KBS_MODE=real (Phase B). The actual values are
+# obtained from EGM/Jandarma; until then KBS_MODE stays "simulation".
+REAL_MODE_REQUIRED_ENV = ("KBS_WSDL_URL",)
+
+
+def _missing_real_mode_env() -> list[str]:
+    """Return a list of required env vars that are missing in real mode."""
+    return [k for k in REAL_MODE_REQUIRED_ENV if not os.environ.get(k)]
+
+
+def _missing_session_kbs_config(sess: dict) -> list[str]:
+    """Return KBS session-side config fields that are missing (real mode only)."""
+    return [
+        k for k in (
+            "kbs_tesis_kodu", "kbs_kullanici_adi", "kbs_sifre",
+            "kbs_servis_url", "kbs_kurum",
+        )
+        if not (sess.get(k) or "").strip()
+    ]
 
 
 # ---------- Worker identity ----------
@@ -89,13 +111,20 @@ class WorkerState:
         self.last_poll_at: Optional[str] = None
         self.last_poll_ok: Optional[bool] = None
         self.last_error: Optional[str] = None
-        self.session_status: str = "no_session"  # no_session | ok | invalid
+        # Possible values:
+        #   no_session, ok, invalid, kbs_not_configured, refused
+        self.session_status: str = "no_session"
         self.queue_stats: dict[str, int] = {}
         self.claim_count: int = 0
         self.complete_count: int = 0
         self.fail_count: int = 0
         self.recent_jobs: list[dict] = []  # newest first, capped
         self.running: bool = False
+        self.kbs_mode: str = os.environ.get("KBS_MODE", "simulation").lower()
+        self.replay_count: int = 0
+        # Track which session token we already replayed for so we don't
+        # re-scan the journal every poll.
+        self._last_replayed_token: Optional[str] = None
 
     def record_recent(self, job_id: str, action: str, outcome: str, detail: str = "") -> None:
         self.recent_jobs.insert(0, {
@@ -117,11 +146,13 @@ class WorkerState:
             "last_poll_ok": self.last_poll_ok,
             "last_error": self.last_error,
             "session_status": self.session_status,
+            "kbs_mode": self.kbs_mode,
             "queue_stats": self.queue_stats,
             "counters": {
                 "claim": self.claim_count,
                 "complete": self.complete_count,
                 "fail": self.fail_count,
+                "replay": self.replay_count,
             },
             "recent_jobs": self.recent_jobs,
         }
@@ -179,15 +210,18 @@ async def _claim_then_process(
     worker_id: str,
     job: dict,
     state: WorkerState,
+    kbs_cfg: Optional[dict] = None,
 ) -> None:
     """Claim a single job and run the simulated KBS submission."""
     job_id = job["id"]
     payload = job.get("payload") or {}
 
-    # ----- claim -----
+    # ----- claim (with persistent idempotency key) -----
+    claim_key = idem.get_or_create(job_id, "claim")
     try:
         claim_resp = await claim_job(
-            pms_url, token, job_id, worker_id, lease_seconds=LEASE_SECONDS
+            pms_url, token, job_id, worker_id,
+            lease_seconds=LEASE_SECONDS, idem_key=claim_key,
         )
         state.claim_count += 1
         state.record_recent(job_id, "claim", "ok")
@@ -197,6 +231,9 @@ async def _claim_then_process(
             log.info("Job %s skip (claim %s): %s", job_id, e.status_code, e.detail)
             state.record_recent(job_id, "claim", f"skip-{e.status_code}", str(e.detail)[:200])
             journal.append("claim_skip", job_id=job_id, status=e.status_code)
+            # Job is gone or already taken — release the idem keys so a
+            # future job with the same id (PMS reuse) starts fresh.
+            idem.cleanup(job_id)
             return
         if e.status_code == 401:
             raise  # bubble up so the loop marks session invalid
@@ -215,7 +252,7 @@ async def _claim_then_process(
         # submit_guest is sync (Phase A simulation uses time.sleep; Phase B will
         # replace with httpx-async). Offload to a thread so the polling loop
         # stays responsive — keeps poll-now and shutdown signals snappy.
-        kbs_reference = await asyncio.to_thread(submit_guest, payload, None)
+        kbs_reference = await asyncio.to_thread(submit_guest, payload, kbs_cfg)
     except KBSConfigError as e:
         # Genuine config error (e.g. Phase B not yet wired) → permanent
         error_msg = f"KBSConfigError: {e}"
@@ -237,36 +274,138 @@ async def _claim_then_process(
 
     # ----- report back to PMS -----
     if kbs_reference:
+        # Journal the INTENT before calling PMS. If the call succeeds we'll
+        # write a matching complete_ack; if we crash after this line, restart
+        # replay will see pending_complete with no ack and re-call PMS using
+        # the same idem key (PMS de-dupes).
+        journal.append("pending_complete", job_id=job_id, kbs_reference=kbs_reference)
+        complete_key = idem.get_or_create(job_id, "complete")
         try:
-            await complete_job(pms_url, token, job_id, worker_id, kbs_reference)
+            await complete_job(
+                pms_url, token, job_id, worker_id, kbs_reference,
+                idem_key=complete_key,
+            )
             state.complete_count += 1
             state.record_recent(job_id, "complete", "ok", kbs_reference)
-            journal.append("complete", job_id=job_id, kbs_reference=kbs_reference)
+            journal.append("complete_ack", job_id=job_id, kbs_reference=kbs_reference)
+            idem.cleanup(job_id)  # terminal state — release keys
             log.info("Job %s done. ref=%s", job_id, kbs_reference)
         except PMSError as e:
             if e.status_code == 409:
                 # Already closed (e.g. duplicate complete after retry) → treat as ok
                 state.record_recent(job_id, "complete", "already-done", kbs_reference)
+                journal.append("complete_ack", job_id=job_id, kbs_reference=kbs_reference, dup=True)
+                idem.cleanup(job_id)
                 log.info("Job %s already closed on PMS (409). ref=%s", job_id, kbs_reference)
             elif e.status_code == 401:
                 raise
             else:
                 log.error("Job %s complete hatasi (%s): %s", job_id, e.status_code, e.detail)
                 state.record_recent(job_id, "complete", "pms-error", str(e.detail)[:200])
+                # No ack written → replay will retry on next start.
         return
 
     # KBS failed → fail the job
+    journal.append("pending_fail", job_id=job_id, retry=retry, error=(error_msg or "")[:500])
+    fail_key = idem.get_or_create(job_id, "fail")
     try:
-        await fail_job(pms_url, token, job_id, worker_id, error_msg or "Bilinmeyen KBS hatasi", retry)
+        fail_resp = await fail_job(
+            pms_url, token, job_id, worker_id,
+            error_msg or "Bilinmeyen KBS hatasi", retry, idem_key=fail_key,
+        )
         state.fail_count += 1
         outcome = "retry" if retry else "dead"
         state.record_recent(job_id, "fail", outcome, (error_msg or "")[:200])
-        journal.append("fail", job_id=job_id, retry=retry, error=(error_msg or "")[:500])
+        will_retry = bool((fail_resp or {}).get("will_retry", retry))
+        journal.append("fail_ack", job_id=job_id, will_retry=will_retry)
+        if not will_retry:
+            # PMS marked the job dead — release idem keys.
+            idem.cleanup(job_id)
     except PMSError as e:
         if e.status_code == 401:
             raise
         log.error("Job %s fail() hatasi (%s): %s", job_id, e.status_code, e.detail)
         state.record_recent(job_id, "fail", "pms-error", str(e.detail)[:200])
+        # No ack written → replay will retry on next start.
+
+
+# ---------- Crash-recovery replay ----------
+
+async def _replay_unacked(pms_url: str, token: str, worker_id: str, state: WorkerState) -> bool:
+    """Replay any complete/fail intent that wasn't acked before a crash.
+
+    PMS de-dupes via Idempotency-Key, so re-calling with the same key after a
+    successful-but-unacked first call is safe (PMS returns 409 or the original
+    response). We bail on the first 401 so the loop can clear the session.
+
+    Returns True if every unacked entry was either acked or is permanently
+    gone (we journaled the ack); False if any entry hit a transient PMS error
+    and is still unacked. The caller uses this to decide whether to mark the
+    session as "fully replayed" — if we return False, next poll will retry.
+    """
+    try:
+        unacked = journal.find_unacked()
+    except Exception:  # pragma: no cover - defensive
+        log.exception("journal.find_unacked() basarisiz, replay atlandi")
+        return False
+    if not unacked:
+        return True
+    log.info("Replaying %d unacked PMS intent(s) after restart", len(unacked))
+    all_resolved = True
+    for rec in unacked:
+        ev = rec.get("event")
+        jid = rec.get("job_id")
+        try:
+            if ev == "pending_complete":
+                ref = rec.get("kbs_reference") or ""
+                key = idem.get_or_create(jid, "complete")
+                try:
+                    await complete_job(pms_url, token, jid, worker_id, ref, idem_key=key)
+                    journal.append("complete_ack", job_id=jid, kbs_reference=ref, replay=True)
+                    idem.cleanup(jid)
+                    state.complete_count += 1
+                    state.replay_count += 1
+                    state.record_recent(jid, "replay-complete", "ok", ref)
+                except PMSError as e:
+                    if e.status_code == 409:
+                        journal.append("complete_ack", job_id=jid, kbs_reference=ref,
+                                        replay=True, dup=True)
+                        idem.cleanup(jid)
+                        state.replay_count += 1
+                        state.record_recent(jid, "replay-complete", "already-done", ref)
+                    elif e.status_code == 401:
+                        raise
+                    else:
+                        log.warning("Replay complete %s hata %s: %s", jid, e.status_code, e.detail)
+                        state.record_recent(jid, "replay-complete", "pms-error", str(e.detail)[:200])
+                        all_resolved = False
+            elif ev == "pending_fail":
+                err = rec.get("error") or "Bilinmeyen hata"
+                want_retry = bool(rec.get("retry", True))
+                key = idem.get_or_create(jid, "fail")
+                try:
+                    fr = await fail_job(pms_url, token, jid, worker_id, err, want_retry, idem_key=key)
+                    journal.append("fail_ack", job_id=jid,
+                                    will_retry=bool((fr or {}).get("will_retry", want_retry)),
+                                    replay=True)
+                    state.replay_count += 1
+                    state.fail_count += 1
+                    if not (fr or {}).get("will_retry", want_retry):
+                        idem.cleanup(jid)
+                    state.record_recent(jid, "replay-fail",
+                                         "retry" if want_retry else "dead", err[:200])
+                except PMSError as e:
+                    if e.status_code == 401:
+                        raise
+                    log.warning("Replay fail %s hata %s: %s", jid, e.status_code, e.detail)
+                    state.record_recent(jid, "replay-fail", "pms-error", str(e.detail)[:200])
+                    all_resolved = False
+        except PMSError:
+            raise
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Replay job %s islerken hata", jid)
+            all_resolved = False
+    return all_resolved
 
 
 # ---------- Main loop ----------
@@ -290,6 +429,31 @@ async def _poll_once(state: WorkerState) -> None:
         state.last_poll_ok = True
         return
 
+    # In real KBS mode, the worker MUST refuse to submit until BOTH:
+    #   (1) the real SOAP path is actually implemented (kbs_client.is_real_ready)
+    #   (2) the operator has supplied the KBS credentials/cert/kurum
+    # Otherwise the simulated/missing _send_real raises KBSConfigError, the
+    # worker would dead-letter the job, and the guest would silently NOT be
+    # reported to EGM. We refuse to process at all instead.
+    if state.kbs_mode == "real":
+        if not is_real_ready():
+            state.session_status = "kbs_not_ready"
+            state.last_error = (
+                "Gercek KBS gonderimi henuz aktif degil "
+                "(WSDL + mTLS sertifikasi gelince kbs_client._send_real() doldurulacak). "
+                "Isler PMS kuyrugunda bekletiliyor; dead-letter atilmadi."
+            )
+            state.last_poll_at = datetime.now(timezone.utc).isoformat()
+            state.last_poll_ok = False
+            return
+        missing = _missing_session_kbs_config(sess)
+        if missing:
+            state.session_status = "kbs_not_configured"
+            state.last_error = "Eksik KBS ayarlari: " + ", ".join(missing)
+            state.last_poll_at = datetime.now(timezone.utc).isoformat()
+            state.last_poll_ok = False
+            return
+
     try:
         data = await list_queue(pms_url, token, status="pending", limit=20)
     except PMSError as e:
@@ -308,12 +472,41 @@ async def _poll_once(state: WorkerState) -> None:
     state.last_poll_ok = True
     state.last_error = None
 
+    # Run crash-recovery replay until every unacked entry is resolved. We only
+    # mark the token "fully replayed" when nothing is left pending — otherwise
+    # transient PMS 5xx during the first replay would silently strand the
+    # unacked entries until the next login or process restart.
+    if state._last_replayed_token != token:
+        try:
+            fully_resolved = await _replay_unacked(pms_url, token, state.worker_id, state)
+            if fully_resolved:
+                state._last_replayed_token = token
+            # else: leave _last_replayed_token unchanged so next poll retries.
+        except PMSError as e:
+            if e.status_code == 401:
+                clear_session()
+                state.session_status = "invalid"
+                state.last_error = "Replay sirasinda 401, oturum gecersiz"
+                return
+            # Non-401 errors during replay: log and continue with the normal poll.
+            log.warning("Replay sirasinda PMS hatasi: %s %s", e.status_code, e.detail)
+
+    # Build a small KBS config view of the session for submit_guest.
+    kbs_cfg = {
+        k: sess.get(k, "") for k in (
+            "kbs_tesis_kodu", "kbs_kullanici_adi", "kbs_sifre",
+            "kbs_servis_url", "kbs_kurum",
+        )
+    }
+
     jobs = data.get("jobs") or []
     for job in jobs:
         if not _is_due(job.get("next_retry_at")):
             continue
         try:
-            await _claim_then_process(pms_url, token, state.worker_id, job, state)
+            await _claim_then_process(
+                pms_url, token, state.worker_id, job, state, kbs_cfg,
+            )
         except PMSError as e:
             if e.status_code == 401:
                 log.warning("Job islerken 401, oturum gecersiz")
@@ -375,12 +568,30 @@ async def _loop(state: WorkerState, stop: asyncio.Event, poll_now: asyncio.Event
 
 
 def start(loop_factory=_loop) -> None:
-    """Idempotent: launch the polling loop on the running event loop."""
+    """Idempotent: launch the polling loop on the running event loop.
+
+    In real KBS mode, refuses to start if env-level config (e.g. KBS_WSDL_URL)
+    is missing. The status endpoint will surface the refusal so the operator
+    sees exactly which env var to set instead of getting silent simulated refs.
+    """
     global _task, _stop_event, _poll_now_event
     if _task is not None and not _task.done():
         log.info("worker zaten calisiyor, atlanildi")
         return
     state = get_state()
+
+    if state.kbs_mode == "real":
+        missing_env = _missing_real_mode_env()
+        if missing_env:
+            state.session_status = "refused"
+            state.running = False
+            state.last_error = (
+                "KBS_MODE=real ama eksik env: " + ", ".join(missing_env)
+                + ". Worker baslatilmadi (sahte basari uretilmez)."
+            )
+            log.error(state.last_error)
+            return
+
     _stop_event = asyncio.Event()
     _poll_now_event = asyncio.Event()
     _task = asyncio.create_task(loop_factory(state, _stop_event, _poll_now_event))

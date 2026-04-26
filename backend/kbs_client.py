@@ -67,15 +67,74 @@ def _send_simulated(payload: dict, cfg: dict) -> str:
     """Phase A stub: pretend to call SOAP, return a fake reference."""
     time.sleep(0.4)
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
-    tesis = (cfg.get("tesis_kodu") or "DEMO").strip() or "DEMO"
+    # Accept both the session-style key (kbs_tesis_kodu) and the bare name
+    # (tesis_kodu) so callers can pass either.
+    tesis = (cfg.get("kbs_tesis_kodu") or cfg.get("tesis_kodu") or "DEMO").strip() or "DEMO"
     return f"SIM-{tesis}-{today}-{secrets.token_hex(4).upper()}"
 
 
-# ---------- Real (placeholder until Phase B) ----------
+# ---------- Real (Phase B activation point) ----------
+
+# Flip to True once `_send_real()` is fully implemented against the real
+# WSDL+mTLS materials. The worker uses this as a hard gate: while False, real
+# mode REFUSES to process jobs entirely (never calls fail_job → no risk of
+# PMS dead-lettering jobs because SOAP isn't wired yet).
+REAL_SOAP_IMPLEMENTED = False
+
+
+def is_real_ready() -> bool:
+    """Reports whether real KBS submission is actually wired (Phase B done)."""
+    return REAL_SOAP_IMPLEMENTED
+
+
+REAL_REQUIRED_CONFIG = (
+    "kbs_tesis_kodu",
+    "kbs_kullanici_adi",
+    "kbs_sifre",
+    "kbs_servis_url",
+    "kbs_kurum",  # "polis" | "jandarma"
+)
+
+
+def _validate_real_config(cfg: dict) -> None:
+    """Strict validation; raises KBSConfigError naming exactly what is missing.
+
+    Run this in real mode BEFORE attempting any SOAP call so the operator gets
+    a clear message in the worker status panel instead of an opaque transport
+    error from zeep / requests.
+    """
+    missing = [k for k in REAL_REQUIRED_CONFIG if not (cfg.get(k) or "").strip()]
+    if missing:
+        raise KBSConfigError(
+            "Eksik KBS yapilandirmasi: " + ", ".join(missing)
+            + " (Ayarlar sayfasindan tamamlayin)."
+        )
+    if cfg["kbs_kurum"] not in ("polis", "jandarma"):
+        raise KBSConfigError(
+            f"Gecersiz kbs_kurum: {cfg['kbs_kurum']!r}. 'polis' veya 'jandarma' olmali."
+        )
+    # Env-side requirements (WSDL + cert). The actual zeep client construction
+    # lands once EGM/Jandarma have provided WSDL + mTLS materials.
+    if not os.environ.get("KBS_WSDL_URL"):
+        raise KBSConfigError(
+            "KBS_WSDL_URL ortam degiskeni eksik. Emniyet'in verdigi WSDL URL/dosya yolu."
+        )
+
 
 def _send_real(payload: dict, cfg: dict) -> str:
-    """Real EGM/Jandarma SOAP call. Implemented in Phase B."""
+    """Real EGM/Jandarma SOAP call.
+
+    Phase B activation: replace the body below with zeep-based SOAP envelope
+    construction (per the WSDL + XSD field names provided by Emniyet) and
+    mTLS transport (KBS_CERT_PATH/KBS_KEY_PATH or KBS_PFX_PATH + CA bundle).
+
+    Until WSDL + mTLS materials are in hand, we explicitly REFUSE to fabricate
+    a reference number — submitting a fake "rapor" to the police would be a
+    legal/regulatory violation.
+    """
+    _validate_real_config(cfg)
     raise KBSConfigError(
-        "Gercek KBS gonderimi henuz aktif degil (Phase B). "
-        "KBS_MODE=simulation kullanin veya WSDL/sertifika geldiginde Phase B'yi tamamlayin."
+        "Gercek KBS gonderimi henuz aktif degil. "
+        "WSDL + mTLS sertifikasi geldiginde kbs_client._send_real() doldurulacak. "
+        "O zamana kadar KBS_MODE=simulation kullanin."
     )

@@ -56,6 +56,8 @@ class SettingsIn(BaseModel):
     kbs_kullanici_adi: Optional[str] = ""
     kbs_sifre: Optional[str] = None  # None = preserve existing
     kbs_servis_url: Optional[str] = ""
+    # "polis" (EGM KBS) or "jandarma" (JKBS). Empty until operator chooses.
+    kbs_kurum: Optional[str] = ""
 
 
 class LoginIn(BaseModel):
@@ -69,7 +71,10 @@ class LoginIn(BaseModel):
 # ---------- Helpers ----------
 
 def _kbs_is_configured(sess: dict) -> bool:
-    return all(sess.get(k) for k in ("kbs_tesis_kodu", "kbs_kullanici_adi", "kbs_sifre", "kbs_servis_url"))
+    return all(
+        sess.get(k)
+        for k in ("kbs_tesis_kodu", "kbs_kullanici_adi", "kbs_sifre", "kbs_servis_url", "kbs_kurum")
+    )
 
 
 def require_session() -> dict:
@@ -119,6 +124,7 @@ async def get_settings() -> dict:
         "pms_url": settings.get("pms_url", ""),
         "hotel_id": settings.get("hotel_id", ""),
         "kbs_configured": bool(sess and _kbs_is_configured(sess)),
+        "kbs_kurum": (sess or {}).get("kbs_kurum", ""),
     }
 
 
@@ -128,6 +134,10 @@ async def update_settings(payload: SettingsIn) -> dict:
     # Reject loopback/self-host before persisting — otherwise the worker would
     # later try to call back into this process.
     _validate_pms_url(payload.pms_url)
+    # Validate kbs_kurum if provided — only 'polis' or 'jandarma' allowed.
+    kurum = (payload.kbs_kurum or "").strip().lower()
+    if kurum and kurum not in ("polis", "jandarma"):
+        raise HTTPException(status_code=400, detail="kbs_kurum 'polis' veya 'jandarma' olmali")
     save_settings({**load_settings(), "pms_url": payload.pms_url})
     sess = load_session()
     if sess is not None:
@@ -136,6 +146,7 @@ async def update_settings(payload: SettingsIn) -> dict:
         if payload.kbs_sifre:
             sess["kbs_sifre"] = payload.kbs_sifre
         sess["kbs_servis_url"] = payload.kbs_servis_url or ""
+        sess["kbs_kurum"] = kurum
         sess["pms_url"] = payload.pms_url
         save_session(sess)
     return {"ok": True, "kbs_configured": bool(sess and _kbs_is_configured(sess))}
@@ -170,6 +181,7 @@ async def login(payload: LoginIn) -> dict:
         "kbs_kullanici_adi": prev.get("kbs_kullanici_adi", ""),
         "kbs_sifre": prev.get("kbs_sifre", ""),
         "kbs_servis_url": prev.get("kbs_servis_url", ""),
+        "kbs_kurum": prev.get("kbs_kurum", ""),
     })
     # Wake worker so it picks up the new session immediately
     worker.trigger_poll_now()

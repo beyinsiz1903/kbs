@@ -61,3 +61,42 @@ def tail(n: int = 50) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return out
+
+
+# Pending → ack pairs used by the worker for crash-recovery replay:
+#   pending_complete  ↔  complete_ack
+#   pending_fail      ↔  fail_ack
+_PENDING_TO_ACK: dict[str, str] = {
+    "pending_complete": "complete_ack",
+    "pending_fail": "fail_ack",
+}
+
+
+def find_unacked(scan_records: int = 2000) -> list[dict]:
+    """Scan the tail of the journal and return pending events with no ack.
+
+    Used at worker startup to replay PMS calls that crashed in-flight. PMS
+    de-dupes via the Idempotency-Key header, so replaying is safe even if
+    the original call actually succeeded but our process died before logging
+    the ack.
+
+    Returns the LAST pending entry per job_id (most recent intent wins).
+    """
+    records = tail(scan_records)
+    pending: dict[str, dict] = {}
+    for r in records:
+        ev = r.get("event")
+        jid = r.get("job_id")
+        if not jid:
+            continue
+        if ev in _PENDING_TO_ACK:
+            pending[jid] = r
+            continue
+        # If we see an ack, drop the matching pending intent (it succeeded).
+        for pend_ev, ack_ev in _PENDING_TO_ACK.items():
+            if ev == ack_ev:
+                cur = pending.get(jid)
+                if cur and cur.get("event") == pend_ev:
+                    pending.pop(jid, None)
+                break
+    return list(pending.values())

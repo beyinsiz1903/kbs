@@ -17,6 +17,7 @@ export default function SettingsPage() {
   const [kullaniciAdi, setKullaniciAdi] = useState('');
   const [sifre, setSifre] = useState('');
   const [servisUrl, setServisUrl] = useState('');
+  const [kbsKurum, setKbsKurum] = useState('');
   const [kbsConfigured, setKbsConfigured] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -25,6 +26,7 @@ export default function SettingsPage() {
       .then((s) => {
         setPmsUrl(s.pms_url || '');
         setKbsConfigured(!!s.kbs_configured);
+        setKbsKurum(s.kbs_kurum || '');
       })
       .catch((err) => toast.error(errorMessage(err)));
   }, []);
@@ -43,6 +45,7 @@ export default function SettingsPage() {
         // Bos birakilirsa backend mevcut sifreyi korur (null = preserve)
         kbs_sifre: sifre ? sifre : null,
         kbs_servis_url: servisUrl.trim(),
+        kbs_kurum: kbsKurum,
       });
       toast.success('Ayarlar kaydedildi');
       await refreshKbsStatus();
@@ -149,6 +152,38 @@ export default function SettingsPage() {
             />
             <p className="text-[10px] text-muted-foreground">
               EGM/Jandarma KBS web servisinin SOAP/XML endpoint URL'si.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label>Kurum</Label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="radio"
+                  name="kbs_kurum"
+                  value="polis"
+                  checked={kbsKurum === 'polis'}
+                  onChange={(e) => setKbsKurum(e.target.value)}
+                  data-testid="radio-kbs-polis"
+                  className="accent-primary"
+                />
+                Polis (EGM KBS)
+              </label>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="radio"
+                  name="kbs_kurum"
+                  value="jandarma"
+                  checked={kbsKurum === 'jandarma'}
+                  onChange={(e) => setKbsKurum(e.target.value)}
+                  data-testid="radio-kbs-jandarma"
+                  className="accent-primary"
+                />
+                Jandarma (JKBS)
+              </label>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Otelinizin bağlı olduğu kuruma göre seçin. Yanlış seçim raporun reddedilmesine yol açar.
             </p>
           </div>
         </CardContent>

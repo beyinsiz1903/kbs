@@ -81,8 +81,10 @@ izler ve ayarları yönetir.
 | `server.py` | FastAPI; route'lar: `/api/auth/*`, `/api/settings`, `/api/worker/status`, `/api/worker/poll-now` |
 | `worker.py` | Otonom polling task (asyncio). FastAPI startup'ta başlar, shutdown'da temiz kapanır |
 | `session.py` | Fernet ile `/data/.session.enc` ve `/data/settings.json` yönetimi |
-| `pms_client.py` | Syroce PMS v1 KBS Agent contract istemcisi (login, me, queue list/claim/complete/fail) |
+| `pms_client.py` | Syroce PMS v1 KBS Agent contract istemcisi (login, me, queue list/claim/complete/fail) — `idem_key` kwarg destekli |
 | `kbs_client.py` | KBS web servisi göndericisi. **Şu an simülasyon** (`KBS_MODE=simulation`); Phase B'de gerçek SOAP |
+| `idem.py` | Per-job kalıcı Idempotency-Key (`<DATA_DIR>/idem/{job_id}.json`); claim/complete/fail için stable UUID |
+| `journal.py` | `submissions.jsonl`; `find_unacked()` ile pending_complete/fail eşleşmemiş kayıtları tarar (replay için) |
 
 ## Frontend Dosyaları (`frontend/src/`)
 
@@ -142,14 +144,26 @@ docker compose up -d
 ```bash
 uv run pytest tests/ -q
 ```
-26 test (pms_client mock httpx + worker davranış senaryoları).
+51 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards).
 
 ## Faz Planı
 
 - **Phase A (TAMAMLANDI):** Polling worker iskeleti, queue endpoint'leri,
   hotel_id ile login, Worker Status UI, simülasyon KBS.
-- **Phase B (PENDING):** Gerçek EGM/Jandarma SOAP, Idempotency-Key kalıcılığı,
-  KBS sertifika/credential validation.
+- **Phase B (PARÇALI — şemadan bağımsız hazırlık YAPILDI):**
+  - ✅ `backend/idem.py` — per-job Idempotency-Key kalıcılığı (claim/complete/fail UUID'leri).
+  - ✅ Worker journal refaktörü — `pending_complete` PMS'e çağrı ÖNCE, `complete_ack` SONRA;
+    `pending_fail` / `fail_ack` aynı şekilde. `journal.find_unacked()` ile crash-recovery.
+  - ✅ Crash-recovery replay — her oturum başlangıcında bir kez çalışır, asılı kalmış
+    pending kayıtlarını PMS'e tekrar gönderir (idem key sayesinde PMS de-dup eder).
+  - ✅ `KBS_MODE=real` + eksik `KBS_WSDL_URL` → worker **başlamayı reddeder** (`session_status=refused`).
+  - ✅ **`kbs_client.REAL_SOAP_IMPLEMENTED=False`** flag'i: SOAP doldurulana kadar real mode iş **işlemeyi reddeder** (`session_status=kbs_not_ready`).
+    `_send_real`'in `KBSConfigError`'unun `fail_job(retry=False)` zincirine düşüp PMS'in işi dead-letter'a atmasını engeller (veri kaybı koruması).
+  - ✅ Real modda session-tarafı eksik (kbs_kurum vb.) → polling'i atlar (`session_status=kbs_not_configured`).
+  - ✅ Settings UI'a Polis/Jandarma radyosu, backend `kbs_kurum` validasyonu.
+  - ✅ `zeep` + `requests` bağımlılıkları eklendi.
+  - ⏳ **Bekleniyor (Emniyet/Jandarma):** WSDL URL/dosyası, mTLS sertifikası (.pfx veya cert/key),
+    test endpoint. Gelince `kbs_client._send_real()` doldurulup canlıya alınır.
 - **Phase C (PENDING):** Windows packaging (PyInstaller), DPAPI, service mode.
 - **Phase D (PENDING):** Çoklu ajan koordinasyonu, opsiyonel SSE.
 
