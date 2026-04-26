@@ -283,6 +283,21 @@ async def test_sleep_until_event_or_timeout_wakes_on_poll_now(_isolated_data_dir
 
 
 @pytest.mark.asyncio
+async def test_journal_appends_records(_isolated_data_dir):
+    """journal.append must persist line-delimited JSON to DATA_DIR."""
+    import journal
+    journal.append("claim", job_id="job-1", worker_id="agent-x")
+    journal.append("complete", job_id="job-1", kbs_reference="REF-9")
+    records = journal.tail(10)
+    assert len(records) == 2
+    assert records[0]["event"] == "claim"
+    assert records[0]["job_id"] == "job-1"
+    assert records[1]["event"] == "complete"
+    assert records[1]["kbs_reference"] == "REF-9"
+    assert "ts" in records[0]
+
+
+@pytest.mark.asyncio
 async def test_is_due():
     import worker
     assert worker._is_due(None) is True

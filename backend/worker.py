@@ -42,6 +42,7 @@ from pms_client import (
     fail_job,
     list_queue,
 )
+import journal
 from session import DATA_DIR, clear_session, load_session
 
 log = logging.getLogger("kbs-bridge.worker")
@@ -190,10 +191,12 @@ async def _claim_then_process(
         )
         state.claim_count += 1
         state.record_recent(job_id, "claim", "ok")
+        journal.append("claim", job_id=job_id, worker_id=worker_id)
     except PMSError as e:
         if e.status_code in (404, 409):
             log.info("Job %s skip (claim %s): %s", job_id, e.status_code, e.detail)
             state.record_recent(job_id, "claim", f"skip-{e.status_code}", str(e.detail)[:200])
+            journal.append("claim_skip", job_id=job_id, status=e.status_code)
             return
         if e.status_code == 401:
             raise  # bubble up so the loop marks session invalid
@@ -235,6 +238,7 @@ async def _claim_then_process(
             await complete_job(pms_url, token, job_id, worker_id, kbs_reference)
             state.complete_count += 1
             state.record_recent(job_id, "complete", "ok", kbs_reference)
+            journal.append("complete", job_id=job_id, kbs_reference=kbs_reference)
             log.info("Job %s done. ref=%s", job_id, kbs_reference)
         except PMSError as e:
             if e.status_code == 409:
@@ -254,6 +258,7 @@ async def _claim_then_process(
         state.fail_count += 1
         outcome = "retry" if retry else "dead"
         state.record_recent(job_id, "fail", outcome, (error_msg or "")[:200])
+        journal.append("fail", job_id=job_id, retry=retry, error=(error_msg or "")[:500])
     except PMSError as e:
         if e.status_code == 401:
             raise

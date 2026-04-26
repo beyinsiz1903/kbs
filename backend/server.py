@@ -195,13 +195,19 @@ async def logout() -> dict:
 # ---------- Worker status ----------
 
 @app.get("/api/worker/status")
-async def worker_status() -> dict:
-    """Snapshot of the polling worker for the UI."""
+async def worker_status(sess: dict = Depends(require_session)) -> dict:
+    """Snapshot of the polling worker for the UI.
+
+    Requires an active session so that when the worker clears the session on
+    a PMS 401, the very next status poll returns 401 and the frontend axios
+    interceptor falls back to the login screen immediately (instead of showing
+    stale "authenticated" state until the user navigates).
+    """
     return worker.get_state().to_dict()
 
 
 @app.post("/api/worker/poll-now", dependencies=[Depends(require_csrf)])
-async def worker_poll_now() -> dict:
+async def worker_poll_now(sess: dict = Depends(require_session)) -> dict:
     """Wake the worker now instead of waiting for the next poll tick."""
     triggered = worker.trigger_poll_now()
     return {"triggered": triggered}

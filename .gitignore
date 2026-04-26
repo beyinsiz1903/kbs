@@ -85,3 +85,6 @@ frontend/node_modules/.cache/default-development/0.pack
 # Environment files
 *.env
 *.env.*
+
+# Local dev runtime state (Fernet key, encrypted session, settings, worker_id, journal)
+.devdata/
