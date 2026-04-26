@@ -205,6 +205,11 @@ uv run pytest tests/ -q
     `AppShell` seviyesinde tek polling'den (5s) sürülüyor. Önceden sadece
     WorkerStatusPage mount iken çalışıyordu, /ayarlar açıkken kopma sessizdi.
     Provider unmount → başlık restore.
+  - ✅ Operatör ses tercihi (`frontend/src/lib/operatorPrefs.js` +
+    SettingsPage "Bildirim Tercihleri" kartı): localStorage anahtarı
+    `kbs.operator.alertSoundEnabled` (varsayılan açık). Ayarlar'daki Switch
+    (`switch-alert-sound`) anlık yansır; kapalıyken beep çalmaz, toast +
+    sekme başlığı yine çalışır. Tarayıcıya bağlı tercih (PMS hesabına değil).
   - ⏳ **Bekleniyor (PMS ekibi):** `/api/kbs/queue/stream` endpoint'inin canlı PMS'te yayına alınması.
     Ajan tarafı hazır; sözleşme: `event: new_job\ndata: {"job_id":"...","tenant_id":"..."}`,
     `Authorization: Bearer <token>`, opsiyonel `Last-Event-ID` resume, `event: heartbeat` keep-alive.
