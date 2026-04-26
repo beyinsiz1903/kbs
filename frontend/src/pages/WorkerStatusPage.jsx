@@ -6,7 +6,7 @@ import { Badge } from '../components/ui/badge';
 import { toast } from 'sonner';
 import {
   RefreshCw, PlayCircle, CheckCircle2, AlertTriangle, XCircle,
-  Activity, Wifi, WifiOff, Clock,
+  Activity, Wifi, WifiOff, Clock, Users,
 } from 'lucide-react';
 
 const REFRESH_MS = 5000;
@@ -225,6 +225,46 @@ export default function WorkerStatusPage() {
           <StatBox label="Fail" value={counters.fail} accent="red" />
         </div>
       </div>
+
+      {/* Other agents (Phase D — multi-agent visibility) */}
+      <Card className="bg-card/40 border-border/50" data-testid="card-other-workers">
+        <div className="px-4 py-3 border-b border-border/30 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Users className="h-4 w-4 text-sky-400" />
+            <p className="text-sm font-semibold">Diğer Aktif Ajanlar</p>
+          </div>
+          <Badge variant="outline" className="text-xs">
+            {(status?.other_workers || []).length} ajan
+          </Badge>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/20 text-xs uppercase text-muted-foreground">
+              <tr>
+                <th className="px-4 py-3 text-left">Worker ID</th>
+                <th className="px-4 py-3 text-left">İşlenen iş</th>
+                <th className="px-4 py-3 text-left">Lease bitişi</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(status?.other_workers || []).length === 0 && (
+                <tr>
+                  <td colSpan={3} className="px-4 py-6 text-center text-xs text-muted-foreground">
+                    Şu anda bu otelde başka aktif ajan yok. (PMS yalnızca senin ajanını görüyor.)
+                  </td>
+                </tr>
+              )}
+              {(status?.other_workers || []).map((w) => (
+                <tr key={w.worker_id} className="border-t border-border/20 hover:bg-muted/10" data-testid={`row-other-worker-${w.worker_id}`}>
+                  <td className="px-4 py-2 font-mono text-xs">{w.worker_id}</td>
+                  <td className="px-4 py-2 text-xs">{w.job_count}</td>
+                  <td className="px-4 py-2 text-xs text-muted-foreground">{fmtTime(w.lease_expires_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
 
       {/* Recent jobs */}
       <Card className="bg-card/40 border-border/50">
