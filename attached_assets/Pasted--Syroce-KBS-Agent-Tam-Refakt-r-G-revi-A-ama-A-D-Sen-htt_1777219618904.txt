@@ -1,0 +1,373 @@
+# Syroce KBS Agent — Tam Refaktör Görevi (Aşama A → D)
+
+Sen, `https://github.com/beyinsiz1903/kbs` reposundaki KBS Bridge uygulamasını,
+**Syroce PMS v1 KBS Agent kontratına** tam uyumlu, **üretim-kalitesinde otonom
+bir Windows ajanına** dönüştüreceksin. İş sadece kod yazmak değil; mimari
+değişiklik (interaktif web köprüsü → otonom polling worker), gerçek polis SOAP
+entegrasyonu, paketleme ve güvenlik sertleştirmesi içerir.
+
+---
+
+## 1) Bağlam
+
+Otelde Syroce PMS (FastAPI + MongoDB) merkezde çalışıyor. Resepsiyon
+makinesinde bizim ajanımız 7/24 dönüp PMS'in KBS kuyruğunu yokluyor, biriken
+işleri polise (EGM/Jandarma) gönderiyor, sonucu PMS'e raporluyor. **PMS
+gerçeğin tek kaynağıdır**; ajan stateless çalışır.
+
+Mevcut repo, eski "operatör butonla tetikler" mimarisinde. Bunu kuyruk-tabanlı
+otonom worker'a çevireceksin. Mevcut iyi mühendislik kararlarını koru, eski
+endpoint çağrılarını sil.
+
+---
+
+## 2) PMS SÖZLEŞMESİ (v1) — DEĞİŞTİRİLEMEZ
+
+Tüm istekler `Authorization: Bearer <jwt>` taşır. `tenant_id` token'dan
+çözülür; ajan göndermez.
+
+### 2.1 Auth
+```
+POST {PMS_URL}/api/auth/login
+body: { "hotel_id": "100001", "email": "kbs-bot@otel.com", "password": "..." }
+200:  { "access_token": "...", "token_type": "bearer", "user": {...} }
+```
+> **KRİTİK:** `hotel_id` ZORUNLU. Mevcut repo göndermiyor — düzeltilecek.
+
+```
+GET {PMS_URL}/api/auth/me
+200: { "id": "...", "email": "...", "tenant_id": "...", "role": "..." }
+```
+> Kontrat metnindeki `/api/kbs/me` mevcut PMS'te YOK. `/api/auth/me` kullan.
+
+### 2.2 Kuyruk
+
+#### Listele
+```
+GET {PMS_URL}/api/kbs/queue?status=pending&limit=20
+GET {PMS_URL}/api/kbs/queue?status=pending,in_progress&date_from=2026-04-26
+200: { "jobs": [...], "total": N, "stats": {pending,in_progress,done,failed,dead} }
+```
+Her job şu alanlara sahip:
+```
+{
+  "id": "uuid", "tenant_id": "...", "booking_id": "...", "guest_id": "...",
+  "action": "checkin"|"checkout",
+  "status": "pending"|"in_progress"|"done"|"failed"|"dead",
+  "attempts": int, "max_attempts": int,
+  "worker_id": str|null, "leased_until": iso|null,
+  "next_retry_at": iso|null, "last_error": str|null,
+  "kbs_reference": str|null,
+  "payload": {
+    "guest_name", "room_number", "check_in", "check_out",
+    "nationality", "id_number", "passport_number",
+    "birth_date", "gender", "father_name", "mother_name",
+    "birth_place", "address"
+  },
+  "created_at": iso
+}
+```
+
+#### Atomik Claim
+```
+POST {PMS_URL}/api/kbs/queue/{job_id}/claim
+body: { "worker_id": "agent-pc01-<uuid4>", "lease_seconds": 300 }
+200: { "job": {...status="in_progress"...} }
+409: başka worker tutuyor / iş zaten kapanmış
+404: iş yok
+```
+
+#### Başarı
+```
+POST {PMS_URL}/api/kbs/queue/{job_id}/complete
+body: { "worker_id": "...", "kbs_reference": "KBS-2026-04-26-XXX", "notes": "" }
+200: { "job": {...status="done"...}, "report_id": "uuid" }
+403: worker_id eşleşmiyor
+409: zaten kapanmış
+```
+
+#### Hata
+```
+POST {PMS_URL}/api/kbs/queue/{job_id}/fail
+body: { "worker_id": "...", "error": "string<=2000", "retry": true|false }
+200: { "job": {...}, "will_retry": bool, "next_retry_at": iso|null }
+```
+Retry mantığı (PMS karar verir, ajan sadece raporlar):
+| Koşul | Sonuç |
+|---|---|
+| `retry=true` ve `attempts < max_attempts` | `pending`, exponential backoff |
+| `retry=false` | hemen `dead` |
+| `attempts >= max_attempts` | `dead` (ne yazılırsa yazılsın) |
+
+Backoff: `60 * 2^(attempts-1)` sn, üst sınır 3600.
+
+### 2.3 Idempotency-Key (TÜM POST'lara opsiyonel)
+Her POST isteğine `Idempotency-Key: <uuid4>` header'ı koy. Aynı anahtarla
+tekrar gelen istek aynı sonucu döndürür (PMS tarafında atomik claim ile).
+Worker bir POST attığında: anahtarı üret, dosyaya yaz, başarı/hata olana
+kadar aynı anahtarla retry et.
+
+---
+
+## 3) MEVCUT REPO — Bilinen Sorunlar
+
+| # | Sorun | Çözüm Aşaması |
+|---|---|---|
+| 1 | Login `hotel_id` göndermiyor | A1 |
+| 2 | `/api/kbs/guests?date=` ve `/api/kbs/report` artık PMS'te YOK | A2 |
+| 3 | `/api/kbs/me` yerine `/api/auth/me` olmalı | A1 |
+| 4 | Otonom polling döngüsü yok (manuel buton) | A3 |
+| 5 | `worker_id` kavramı yok → çift gönderim riski | A4 |
+| 6 | Lease/stuck-worker recovery yok | A4 |
+| 7 | Hata sınıflandırma + fail/retry yok | A5 |
+| 8 | `kbs_client.py` stub (NotImplementedError) | B1, B2 |
+| 9 | Idempotency-Key kullanılmıyor | B3 |
+| 10 | Web SPA — Windows servisi değil | C1 |
+| 11 | Fernet dosya + `.devkey` Git'te | C2 |
+| 12 | Yerel log yok, PII maskeleme yok | C3 |
+| 13 | Backend tüm interface'lere bind | C4 |
+
+---
+
+## 4) YAPILACAKLAR — AŞAMA AŞAMA
+
+### Aşama A — Minimum çalışır hâl
+
+**A1. Login formu + `pms_client.login()`**
+- Frontend `LoginForm` bileşenine `hotel_id` input'u ekle (zorunlu, 1-20 char).
+- `pms_client.login(pms_url, hotel_id, email, password)` imzasına geç.
+- `get_me()` → `_authed_get(.., "/api/auth/me")` olarak güncelle.
+- 401 → oturum temizle + login ekranına dön.
+
+**A2. `pms_client.py` — kuyruk uçları**
+Eski fonksiyonları SİL: `get_guests`, `post_report`, `get_reports`,
+`get_report_detail`. Yerine:
+```python
+async def list_queue(pms_url, token, status=None, limit=20, date_from=None) -> dict
+async def claim_job(pms_url, token, job_id, worker_id, lease_seconds=300) -> dict
+async def complete_job(pms_url, token, job_id, worker_id, kbs_reference, notes="", idem_key=None) -> dict
+async def fail_job(pms_url, token, job_id, worker_id, error, retry, idem_key=None) -> dict
+```
+Mevcut `_translate_error`, `_validate_pms_url`, timeout/retry logic'i KORU.
+
+**A3. Polling worker**
+`backend/worker.py` (yeni dosya):
+- Ayrı thread (veya `asyncio.create_task`); FastAPI startup event'inde başlat.
+- Döngü: her `POLL_INTERVAL` (default 15 sn) saniyede bir `list_queue(status="pending", limit=20)`.
+- Her job için: `next_retry_at` geçmemişse atla.
+- Her job için: `try_process(job)` → claim → polise gönder → complete/fail.
+- 401 alırsa oturumu işaretle, ana thread login formuna düşürsün.
+- Worker durumu (son tur, son hata, claim sayacı) bir in-memory state'te tut;
+  yeni endpoint `GET /api/worker/status` ile UI'ya açıkla.
+
+**A4. `worker_id` kalıcılığı**
+- İlk açılışta `<DATA_DIR>/worker_id` dosyasına `{hostname}-{uuid4}` yaz.
+- Sonraki açılışlarda dosyadan oku. Değişmesin.
+
+**A5. Hata sınıflandırma**
+`try_process` içinde polise gönderim sonucuna göre:
+- `httpx.TimeoutException`, `httpx.NetworkError`, `5xx` → `fail(retry=True)`
+- `4xx` (özellikle 400, 401, 403) → `fail(retry=False)`
+- `429` → `fail(retry=True)` + ek log
+- Beklenmeyen exception → `fail(retry=True)` + tam stack trace local log'a
+
+**Aşama A kabul kriterleri:**
+- `pytest tests/test_pms_client.py` (mock httpx) yeşil.
+- `python -m backend.server` çalıştırınca log'da:
+  `worker started: agent-<host>-<uuid> polling every 15s` görünmeli.
+- Manuel test: PMS'te bir kuyruk işi varken ajan 15 sn içinde claim eder,
+  (stub) polise gönderir, complete eder. Aynı işi iki ajan başlatırsan
+  yalnızca biri claim eder.
+
+---
+
+### Aşama B — Üretim
+
+**B1. Gerçek EGM/Jandarma SOAP entegrasyonu**
+`backend/kbs_client.py`'yi sıfırdan yaz:
+- `zeep` paketi kullan (`requirements.txt`'e ekle).
+- WSDL URL'i ortam değişkeninden (`KBS_WSDL_URL`); test için yerel WSDL dosyası
+  da destekle.
+- mTLS: client cert path + key path env'den (`KBS_CERT_PATH`, `KBS_KEY_PATH`,
+  `KBS_CA_BUNDLE`). `zeep` Transport'a `Session(verify=, cert=)` ile geçir.
+- Mesaj çevirimi: PMS payload (TC kimlik, doğum yeri vs.) → KBS XSD şemasındaki
+  alan adları. Gender map (`M`→`E`, `F`→`K`). Tarih formatı `YYYY-MM-DD`.
+- Yabancı misafir (`nationality != "TC"`): `passport_number` + `nationality` ülke
+  kodu zorunlu.
+- Sınıflar:
+  ```python
+  class KBSConfigError(Exception): ...
+  class KBSRetryableError(Exception): ...   # 5xx, timeout, net
+  class KBSFatalError(Exception): ...        # 4xx, schema, validation
+  
+  def submit_guest(payload: dict, config: dict) -> str:
+      """Return KBS reference number. Raise KBSRetryable/Fatal/ConfigError."""
+  ```
+- Worker bu exception sınıflarına göre `retry=True/False` seçer.
+
+**B2. KBS reference parse**
+SOAP cevabından polis tarafının verdiği `referans_no` alanını çıkar; boş gelirse
+`KBSFatalError("KBS yanıtında referans numarası yok")` fırlat.
+
+**B3. Idempotency-Key entegrasyonu**
+Her job için bir kalıcı UUID üret (job claim sırasında):
+- `<DATA_DIR>/idem/{job_id}.json` dosyasında `{claim_key, complete_key, fail_key}`.
+- Her POST'ta uygun anahtarı `Idempotency-Key` header'ı olarak gönder.
+- Job `done`/`dead` olduğunda dosyayı sil.
+
+**B4. Submission journal'i koru, anlamını güncelle**
+Mevcut `submissions.jsonl` mantığı GÜZEL — sil ama tasarımı koru. Her
+complete/fail çağrısından önce journal'a yaz; sonra PMS'e raporla; başarısız
+olursa kaydet. Yeniden başlatmada işlenmemiş journal kayıtlarını PMS'e
+yeniden gönder (bootstrap recovery).
+
+**Aşama B kabul kriterleri:**
+- `KBS_WSDL_URL` env değişkeni boşsa worker startup'ta hata verip durur (sahte
+  başarı dönmez). `KBSConfigError`.
+- Test sertifikalarıyla local mock SOAP server'a (Python `http.server` +
+  hardcoded XML cevap) karşı entegrasyon testi yeşil.
+- PMS'i kapat → ajan retry yapar, açılınca işler düzgün yetişir.
+
+---
+
+### Aşama C — Paketleme + güvenlik
+
+**C1. Windows servisi / Tray icon**
+İki seçenek; ikisini de destekle, `MODE` env ile seçilsin (`service`|`tray`):
+- **Service modu**: `pywin32` `win32serviceutil.ServiceFramework` ile NT
+  servisi. `pyinstaller --onefile --name SyroceKBSAgent server.py`. Servis
+  açılışta worker'ı başlatır, FastAPI'yi `127.0.0.1:8765`'e bind eder.
+- **Tray modu**: `pystray` + `Pillow` ikon. Sağ tıkla menü: "Durum",
+  "Ayarlar", "Logları aç", "Çık". Çift tık → tarayıcıda `http://127.0.0.1:8765`.
+
+`backend/installer.py` veya `installer.iss` (Inno Setup) ile MSI/EXE oluştur.
+Otomatik başlatma: HKCU\Software\Microsoft\Windows\CurrentVersion\Run.
+
+**C2. DPAPI ile credential storage**
+`backend/secure_storage.py` (yeni):
+```python
+def encrypt(plaintext: bytes) -> bytes:  # win32crypt.CryptProtectData
+def decrypt(ciphertext: bytes) -> bytes: # win32crypt.CryptUnprotectData
+```
+- Windows dışında `cryptography.fernet` fallback (dev için).
+- `session.py`: Fernet kaldır, DPAPI kullan.
+- `.devdata/.devkey` ve `.devdata/.session.enc` dosyalarını **Git'ten kaldır**
+  (`git rm --cached`), `.gitignore`'a `.devdata/` ekle.
+- KBS şifreleri: bellekte sadece `submit_guest` çağrısı süresi boyunca tut;
+  cevaptan sonra `del`.
+
+**C3. Loglama + PII maskeleme**
+- `logging.handlers.RotatingFileHandler`: `%LOCALAPPDATA%\SyroceKBSAgent\logs\agent.log`
+  10 MB × 5 dosya.
+- PII maskeleme filter: log mesajlarında TC kimlik (11 hane), pasaport, tam
+  ad, doğum tarihi → `***`. Job id ve booking id maskelenmez.
+- Windows Event Log: her `dead` olan iş için `win32evtlog` ile WARNING yaz
+  (operatör Event Viewer'da görsün).
+
+**C4. Bind sertleştirmesi**
+- `uvicorn.run(host="127.0.0.1", port=int(os.getenv("PORT", "8765")))` —
+  asla `0.0.0.0` değil.
+- Mevcut `X-KBS-Client` CSRF header zorunluluğunu KORU.
+- CORS: yalnızca `http://127.0.0.1:8765` ve `http://localhost:8765`.
+
+**Aşama C kabul kriterleri:**
+- `pyinstaller` çıktısı tek `.exe`, `--installer` flag ile servis kayıt eder.
+- Görev Yöneticisi'nde "SyroceKBSAgent" servisi başlangıçta çalışıyor.
+- `netstat -ano | findstr :8765` → sadece `127.0.0.1:8765` LISTENING.
+- DPAPI testi: kullanıcı oturumu farklıyken `.session.enc` çözülemez.
+
+---
+
+### Aşama D — Opsiyonel (uzun vade)
+
+**D1. Çoklu agent**
+- Aynı `worker_id` dosyası iki makinede çakışmasın → MAC adresi ekle.
+- Worker durum endpoint'inde "diğer agent'lar" listesi (PMS'in
+  `?status=in_progress` cevabından parse edilebilir).
+- Test: aynı otelde 2 agent + 50 iş → 25/25 dağılım, 0 çift gönderim.
+
+**D2. SSE/WebSocket push**
+- PMS tarafında `GET /api/kbs/queue/stream` (SSE) varsayımıyla bağlan; yoksa
+  polling fallback. (Bu PMS'te şimdilik yok — tasarımı önerip gerekirse PMS
+  ekibine ticket aç.)
+
+---
+
+## 5) DOKUNMA / KORU (DON'T)
+
+Şu mevcut iyi kararları **KORU**, silme/değiştirme:
+1. `_validate_pms_url` (localhost / kendi adresi reddi).
+2. `X-KBS-Client` özel header zorunluluğu (CSRF korunması).
+3. `submissions.jsonl` durable journal pattern'i (B4'te yeniden anlamlandır).
+4. PMS ack hatasında bile KBS referansını kaybetmeme prensibi.
+5. PMS URL'i ile KBS kimlik bilgilerini ayrı saklama.
+6. 401 → otomatik logout/relogin.
+
+## 6) YAPMA (Hard NO)
+- Sahte başarı sayma (mock SOAP cevabını üretimde kullanma).
+- KBS şifresini disk'te plain veya log'a yazma.
+- PMS'e aynı `kbs_reference` ile iki kez `complete` çağırma (idempotency-key
+  kullan; PMS 409 dönerse "zaten complete" olarak kabul et).
+- `force=true` ile re-enqueue otomatik yapma — sadece operatör butonuyla.
+- Backend'i `0.0.0.0`'a açma.
+- `print()` kullanma — her şey `logging` üzerinden gitsin.
+
+---
+
+## 7) TEST KOMUTLARI
+
+```bash
+# 1) Login (hotel_id ile)
+TOKEN=$(curl -sS -X POST $PMS_URL/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"hotel_id":"100001","email":"kbs-bot@otel.com","password":"..."}' \
+  | jq -r .access_token)
+
+# 2) Kuyruk
+curl -H "Authorization: Bearer $TOKEN" $PMS_URL/api/kbs/queue?status=pending
+
+# 3) Claim (idempotency-key ile)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H 'Content-Type: application/json' \
+  -d '{"worker_id":"agent-test-01","lease_seconds":300}' \
+  $PMS_URL/api/kbs/queue/<job_id>/claim
+
+# 4) Complete
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H 'Content-Type: application/json' \
+  -d '{"worker_id":"agent-test-01","kbs_reference":"KBS-2026-04-26-001"}' \
+  $PMS_URL/api/kbs/queue/<job_id>/complete
+
+# 5) Fail (retry)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H 'Content-Type: application/json' \
+  -d '{"worker_id":"agent-test-01","error":"timeout","retry":true}' \
+  $PMS_URL/api/kbs/queue/<job_id>/fail
+```
+
+Yukarıdaki 4 senaryo (claim → complete → claim aynı işi tekrar dener → 409,
+fail+retry → next_retry_at dolu döner, fail+retry=false → dead) yeşil olmalı.
+
+---
+
+## 8) ÇIKTI BEKLENTİSİ
+
+İşi bitirdiğinde şunları bana ver:
+1. **PR diff özeti** (silinen + eklenen dosyalar, ana değişiklikler).
+2. **Yeni dosya ağacı** (backend/, frontend/, installer/).
+3. **`requirements.txt` farkı**.
+4. **README.md** — kurulum, env değişkenleri (`PMS_URL`, `KBS_WSDL_URL`,
+   `KBS_CERT_PATH`, `MODE`, `POLL_INTERVAL`, `PORT`), Windows servisi kurulumu,
+   sorun giderme.
+5. **CHANGELOG**: A1 ✅, A2 ✅, ..., D1 ⏳ formatında.
+6. **Test çıktıları** (pytest + manuel curl loglarının ekran görüntüsü/log).
+
+Kod kalitesi: type hints zorunlu (mypy strict geçsin), her public fonksiyon
+docstring'li, `ruff` + `black` temiz. Frontend: TypeScript önerilir ama
+mevcut JS'i koruyabilirsin; component'lere PropTypes veya JSDoc ekle.
+
+Mimariyi değiştirmeden önce sözleşmeyi okuduğunu, A→D'nin sırayla
+uygulanacağını ve her aşama sonunda kabul kriterlerini doğruladığını teyit et.
