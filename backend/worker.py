@@ -77,8 +77,35 @@ def _missing_session_kbs_config(sess: dict) -> list[str]:
 
 # ---------- Worker identity ----------
 
+def _short_mac() -> str:
+    """Return last 4 hex chars of the MAC address, or 'noMAC' if unavailable.
+
+    Phase D: when an otel runs two PCs with the same Windows hostname (common
+    with image deployments), the hostname-only ID collides. Adding a 4-char
+    MAC slug visually disambiguates them in admin tooling without spilling
+    the full MAC into PMS logs.
+
+    `uuid.getnode()` returns a random 48-bit value if the MAC can't be read;
+    bit 0x010000000000 is set in that case — we detect and fall back.
+    """
+    try:
+        node = uuid.getnode()
+    except Exception:
+        return "noMAC"
+    if node & 0x010000000000:
+        # uuid.getnode() couldn't read a real MAC — random fallback per docs.
+        return "noMAC"
+    return f"{node & 0xFFFF:04x}"
+
+
 def _read_or_create_worker_id() -> str:
-    """Persist a stable worker_id across restarts: `<host>-<uuid4>`."""
+    """Persist a stable worker_id across restarts.
+
+    Format: `agent-<host>-<mac4>-<uuid4>`. Existing pre-Phase-D files are
+    honored as-is (no forced regeneration) so an upgrade in the field doesn't
+    spam PMS with phantom-new-agent confusion. The host portion is sanitized
+    (spaces → '-', truncated to 40 chars) so PMS logs stay legible.
+    """
     try:
         if WORKER_ID_FILE.exists():
             wid = WORKER_ID_FILE.read_text().strip()
@@ -87,7 +114,7 @@ def _read_or_create_worker_id() -> str:
     except OSError as e:
         log.warning("worker_id okunamadi: %s", e)
     host = (socket.gethostname() or "agent").replace(" ", "-")[:40]
-    wid = f"agent-{host}-{uuid.uuid4()}"
+    wid = f"agent-{host}-{_short_mac()}-{uuid.uuid4()}"
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         WORKER_ID_FILE.write_text(wid)
@@ -122,7 +149,12 @@ class WorkerState:
         self.recent_jobs: list[dict] = []  # newest first, capped
         self.running: bool = False
         self.kbs_mode: str = os.environ.get("KBS_MODE", "simulation").lower()
+        self.worker_mode: str = os.environ.get("WORKER_MODE", "poll").lower()
         self.replay_count: int = 0
+        # Phase D: distinct worker_ids currently holding in_progress claims.
+        # We exclude our own. Refreshed every poll from PMS list_queue —
+        # operators see at a glance whether a sibling agent is running.
+        self.other_workers: list[dict] = []
         # Track which session token we already replayed for so we don't
         # re-scan the journal every poll.
         self._last_replayed_token: Optional[str] = None
@@ -148,6 +180,7 @@ class WorkerState:
             "last_error": self.last_error,
             "session_status": self.session_status,
             "kbs_mode": self.kbs_mode,
+            "worker_mode": self.worker_mode,
             "queue_stats": self.queue_stats,
             "counters": {
                 "claim": self.claim_count,
@@ -156,6 +189,7 @@ class WorkerState:
                 "replay": self.replay_count,
             },
             "recent_jobs": self.recent_jobs,
+            "other_workers": self.other_workers,
         }
 
 
@@ -203,6 +237,37 @@ def _classify_pms_error(exc: PMSError) -> tuple[bool, str]:
     if 400 <= exc.status_code < 500:
         return False, "client"
     return True, "unknown"
+
+
+async def _refresh_other_workers(pms_url: str, token: str, state: WorkerState) -> None:
+    """Fetch in_progress jobs and extract distinct OTHER worker_ids.
+
+    The PMS is the source of truth — we never talk to siblings directly. A
+    sibling is "active" if it currently holds at least one in_progress lease.
+    We expose: worker_id, job_count, lease_expires_at (latest seen).
+    """
+    try:
+        data = await list_queue(pms_url, token, status="in_progress", limit=100)
+    except PMSError as e:
+        # Non-401 errors here are operational noise — log once at INFO and
+        # leave the prior other_workers snapshot alone (better than wiping).
+        if e.status_code == 401:
+            raise
+        log.info("other_workers fetch atlandi (%s): %s", e.status_code, e.detail)
+        return
+
+    by_worker: dict[str, dict] = {}
+    for job in data.get("jobs") or []:
+        wid = (job.get("worker_id") or "").strip()
+        if not wid or wid == state.worker_id:
+            continue
+        rec = by_worker.setdefault(wid, {"worker_id": wid, "job_count": 0, "lease_expires_at": None})
+        rec["job_count"] += 1
+        lease = job.get("lease_expires_at")
+        # Keep the LATEST lease so the operator can see how recent the sibling is.
+        if lease and (rec["lease_expires_at"] is None or lease > rec["lease_expires_at"]):
+            rec["lease_expires_at"] = lease
+    state.other_workers = sorted(by_worker.values(), key=lambda r: r["worker_id"])
 
 
 async def _claim_then_process(
@@ -475,6 +540,12 @@ async def _poll_once(state: WorkerState) -> None:
     state.last_poll_ok = True
     state.last_error = None
 
+    # Phase D: peek at in_progress jobs to surface SIBLING agents to the
+    # operator. We don't act on this — PMS is the coordinator — but seeing
+    # "agent-RECEPTION-B" in the status panel reassures (or alerts) staff.
+    # Failure here is non-fatal: the main poll cycle continues.
+    await _refresh_other_workers(pms_url, token, state)
+
     # Run crash-recovery replay until every unacked entry is resolved. We only
     # mark the token "fully replayed" when nothing is left pending — otherwise
     # transient PMS 5xx during the first replay would silently strand the
@@ -594,6 +665,29 @@ def start(loop_factory=_loop) -> None:
             )
             log.error(state.last_error)
             return
+
+    # Phase D: WORKER_MODE refusal. The 'sse' mode is reserved for a future
+    # PMS push endpoint that hasn't been confirmed yet — refuse loudly so an
+    # operator setting WORKER_MODE=sse doesn't silently get poll behavior.
+    if state.worker_mode == "sse":
+        state.session_status = "refused"
+        state.running = False
+        state.last_error = (
+            "WORKER_MODE=sse henuz desteklenmiyor. PMS ekibi "
+            "/api/kbs/queue/stream endpoint'ini yayina aldiktan sonra aktive "
+            "edilecek (Faz D follow-up). Simdilik WORKER_MODE=poll kullanin."
+        )
+        log.error(state.last_error)
+        return
+    if state.worker_mode not in ("poll", "auto"):
+        state.session_status = "refused"
+        state.running = False
+        state.last_error = (
+            f"Bilinmeyen WORKER_MODE={state.worker_mode}. "
+            "Gecerli degerler: poll | sse | auto."
+        )
+        log.error(state.last_error)
+        return
 
     _stop_event = asyncio.Event()
     _poll_now_event = asyncio.Event()

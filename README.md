@@ -7,8 +7,10 @@ masaüstü ajanı. Otel resepsiyonu Docker bilmek zorunda değil — ajan tek bi
 sistem tepsisi ikonu) olarak arkada çalışır.
 
 > Phase A (PMS kuyruk worker'ı), Phase B prep (idempotency + crash-replay +
-> KBS gerçek-modu güvenlik kapıları) tamamlandı. Phase C (Windows paketleme
-> + DPAPI + servis modu) bu commit ile geliyor.
+> KBS gerçek-modu güvenlik kapıları), Phase C (Windows paketleme + DPAPI +
+> servis modu) ve Phase D kısmı (multi-agent kimlik + sibling görünürlük)
+> tamamlandı. SSE push entegrasyonu, PMS'in `/api/kbs/queue/stream` endpoint'i
+> yayına girdiğinde aktive edilecek.
 
 ---
 
@@ -49,6 +51,11 @@ PMS (Syroce v1)  ⇄  KBS Bridge (bu uygulama)  ⇄  EGM/Jandarma KBS (SOAP)
 - **Windows servisi (Phase C)**: `pywin32` ile NT servisi, DPAPI ile
   credential şifreleme, Event Log ile dead-job uyarıları, RotatingFileHandler
   + PII maskeleme.
+- **Multi-agent (Phase D)**: Aynı otelde iki resepsiyon PC'sinde aynı anda
+  ajan çalışabilir. PMS'in atomik claim'i çift gönderimi engeller; her
+  ajan diğer ajanları `/api/worker/status` üzerindeki `other_workers`
+  listesinde görür. `worker_id` formatı: `agent-<host>-<mac4>-<uuid4>` —
+  aynı hostname'li iki PC bile MAC kısa eki ile ayrılır.
 
 ---
 
@@ -112,8 +119,16 @@ bash start_frontend.sh
 
 # Test
 uv run pytest tests/ -q
-# 68 test
+# 102 test
 ```
+
+### `WORKER_MODE` env (Phase D)
+
+| Değer  | Davranış                                                          |
+|--------|-------------------------------------------------------------------|
+| `poll` | Default. Her `POLL_INTERVAL` saniyede bir PMS kuyruğunu okur.    |
+| `auto` | Şimdilik `poll` ile aynı. PMS SSE endpoint'i hazır olunca SSE'ye geçecek. |
+| `sse`  | **Henüz desteklenmiyor.** Açık reddedilir (sahte fallback yok).  |
 
 `KBS_MODE=real` ile çalıştırırsan ve `kbs_client.REAL_SOAP_IMPLEMENTED=False`
 ise (default), worker hiçbir iş işlemez (`session_status=kbs_not_ready`).
