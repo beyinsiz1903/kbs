@@ -77,8 +77,8 @@ sc query  SyroceKBSAgent
 ## Güvenlik
 
 - **Loopback bind zorunlu**: HTTP API yalnızca `127.0.0.1:8765` üzerinde
-  dinler. `HOST=0.0.0.0` set etsen bile reddedilir; `KBS_ALLOW_PUBLIC_BIND=1`
-  ile açıkça zorlamadıkça loopback dışına çıkmaz.
+  dinler. `HOST=0.0.0.0` veya bir LAN IP geçirsen bile **kesin reddedilir**
+  (exit kodu 3); escape hatch yoktur. LAN'a açmak isteyen reverse proxy koysun.
 - **CORS**: Yalnızca `http://127.0.0.1:8765` ve dev için `:5000`.
 - **CSRF**: Tüm yazma endpoint'leri `X-KBS-Client: kbs-bridge` header'ı ister.
 - **DPAPI** (Windows): Session ve KBS şifreleri Windows kullanıcısına bağlı

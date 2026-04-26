@@ -51,6 +51,11 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 ; Register the Windows service (admin required)
 Filename: "{app}\{#AppExeName}"; Parameters: "--installer"; Flags: runhidden waituntilterminated; StatusMsg: "Hizmet kaydediliyor..."
+; Set start type = Automatic (Delayed Start) — task acceptance criterion.
+; This avoids competing with logon-time apps and lets the system settle
+; (network, DPAPI subsystem) before the agent comes up.
+Filename: "{sys}\sc.exe"; Parameters: "config {#ServiceName} start= delayed-auto"; Flags: runhidden waituntilterminated; StatusMsg: "Servis baslatma tipi ayarlaniyor..."
+Filename: "{sys}\sc.exe"; Parameters: "description {#ServiceName} ""Syroce KBS Agent — otomatik EGM/Jandarma KBS gonderici"""; Flags: runhidden waituntilterminated
 ; Start the service
 Filename: "{sys}\sc.exe"; Parameters: "start {#ServiceName}"; Flags: runhidden waituntilterminated; StatusMsg: "Hizmet baslatiliyor..."
 

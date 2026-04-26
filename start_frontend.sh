@@ -20,6 +20,10 @@ fi
 
 export KBS_MODE="${KBS_MODE:-simulation}"
 
+# Dev-only CORS: CRA frontend runs on :5000. Production default in
+# backend/server.py is strictly :8765 (Phase C policy).
+export CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:5000,http://127.0.0.1:5000,http://localhost:8765,http://127.0.0.1:8765}"
+
 # Clean stale uvicorn
 pkill -f "uvicorn server:app" 2>/dev/null || true
 sleep 1

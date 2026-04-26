@@ -88,17 +88,13 @@ if _is_windows():  # pragma: no cover - Windows-only branch
 
     except ImportError:
         def main():
-            print(
-                "pywin32 yuklu degil. Service modu icin: pip install pywin32",
-                file=sys.stderr,
-            )
+            log.error("pywin32 yuklu degil. Service modu icin: pip install pywin32")
             sys.exit(1)
 else:
     def main():
-        print(
+        log.error(
             "Service modu yalnizca Windows'ta calisir. "
-            "Linux/macOS'ta 'tray' veya 'server' modunu kullanin.",
-            file=sys.stderr,
+            "Linux/macOS'ta 'tray' veya 'server' modunu kullanin."
         )
         sys.exit(1)
 

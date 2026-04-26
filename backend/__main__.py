@@ -93,7 +93,9 @@ def main(argv=None) -> None:
     elif mode == "service":
         _run_service_mode()
     else:
-        print(f"Bilinmeyen MODE={mode}. Kullanin: server | tray | service", file=sys.stderr)
+        logging.getLogger("kbs-bridge").error(
+            "Bilinmeyen MODE=%s. Kullanin: server | tray | service", mode
+        )
         sys.exit(2)
 
 

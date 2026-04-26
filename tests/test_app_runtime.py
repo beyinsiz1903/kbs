@@ -33,7 +33,8 @@ def test_explicit_loopback_allowed(monkeypatch, host):
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "::", "*", "192.168.1.10", "10.0.0.5", "myhotel.local"])
-def test_non_loopback_rejected_without_override(monkeypatch, host):
+def test_non_loopback_rejected_no_override(monkeypatch, host):
+    """STRICT policy — no escape hatch. Even KBS_ALLOW_PUBLIC_BIND=1 is ignored."""
     monkeypatch.setenv("HOST", host)
     monkeypatch.delenv("KBS_ALLOW_PUBLIC_BIND", raising=False)
     import app_runtime
@@ -43,11 +44,14 @@ def test_non_loopback_rejected_without_override(monkeypatch, host):
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10"])
-def test_non_loopback_allowed_with_override(monkeypatch, host):
+def test_non_loopback_rejected_even_with_override(monkeypatch, host):
+    """Phase C: there is NO public-bind override. The flag is ignored."""
     monkeypatch.setenv("HOST", host)
     monkeypatch.setenv("KBS_ALLOW_PUBLIC_BIND", "1")
     import app_runtime
-    assert app_runtime._resolved_host() == host
+    with pytest.raises(SystemExit) as exc:
+        app_runtime._resolved_host()
+    assert exc.value.code == 3
 
 
 def test_invalid_port_exits(monkeypatch):
