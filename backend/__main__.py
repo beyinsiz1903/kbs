@@ -85,6 +85,16 @@ def main(argv=None) -> None:
     _bootstrap_logging()
     single_instance.acquire_or_exit()
 
+    # Register the Windows Event Log source on every startup. Idempotent —
+    # AddSourceToRegistry is a no-op if already present, and silently fails
+    # on permission/non-Windows. Without this, the FIRST ReportEvent call on
+    # a fresh machine logs a "source not found" warning in Event Viewer.
+    try:
+        from . import eventlog  # type: ignore[import-not-found]
+    except ImportError:
+        import eventlog  # type: ignore[import-not-found,no-redef]
+    eventlog.register_source()
+
     mode = _mode()
     if mode == "server":
         _run_server_mode()
