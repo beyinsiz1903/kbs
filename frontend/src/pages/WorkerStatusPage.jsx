@@ -6,7 +6,7 @@ import { Badge } from '../components/ui/badge';
 import { toast } from 'sonner';
 import {
   RefreshCw, PlayCircle, CheckCircle2, AlertTriangle, XCircle,
-  Activity, Wifi, WifiOff, Clock, Users,
+  Activity, Wifi, WifiOff, Clock, Users, Radio, Satellite, ZapOff, Loader2,
 } from 'lucide-react';
 
 const REFRESH_MS = 5000;
@@ -102,6 +102,11 @@ export default function WorkerStatusPage() {
   const counters = status?.counters || {};
   const sessionStatus = status?.session_status || 'no_session';
   const running = !!status?.running;
+  const workerMode = status?.worker_mode || 'poll';
+  const sseConnected = !!status?.sse_connected;
+  const sseLastEventAt = status?.sse_last_event_at || null;
+  const sseReconnectCount = status?.sse_reconnect_count || 0;
+  const sseConsecutiveFailures = status?.sse?.consecutive_failures || 0;
 
   return (
     <div className="space-y-4">
@@ -170,6 +175,63 @@ export default function WorkerStatusPage() {
                 <AlertTriangle className="h-3 w-3" /> Oturum geçersiz
               </Badge>
             )}
+            {/* Phase D follow-up: live push channel indicator. Tells the
+                operator at a glance whether jobs arrive instantly (SSE) or
+                with up to POLL_INTERVAL delay (poll). */}
+            {workerMode === 'poll' && running && (
+              <Badge
+                variant="outline"
+                className="border-sky-500/40 text-sky-400 gap-1.5"
+                data-testid="badge-channel-poll"
+                title="Worker düzenli aralıklarla PMS'i tarıyor (push kanalı yok)"
+              >
+                <Satellite className="h-3 w-3" /> Tarama modu
+              </Badge>
+            )}
+            {(workerMode === 'sse' || workerMode === 'auto') && running && sseConnected && (
+              <Badge
+                variant="outline"
+                className="border-emerald-500/40 text-emerald-400 gap-1.5"
+                data-testid="badge-channel-live"
+                title={`PMS'e canlı push bağlantısı açık. Son olay: ${relTime(sseLastEventAt)}`}
+              >
+                <Radio className="h-3 w-3 animate-pulse" /> Canlı bağlantı
+              </Badge>
+            )}
+            {/* Initial connect window: SSE/auto açıldı ama henüz ne event geldi
+                ne de hata oldu. Operatör bu kısa pencerede de kanal durumunu
+                görsün (yoksa "rozet yok" gibi sessiz görünür). Session yoksa
+                supervisor zaten bekliyor — "Bağlanıyor" yanıltıcı olur, gizle. */}
+            {(workerMode === 'sse' || workerMode === 'auto') && running && sessionStatus === 'ok' && !sseConnected && sseConsecutiveFailures === 0 && sseReconnectCount === 0 && (
+              <Badge
+                variant="outline"
+                className="border-sky-500/40 text-sky-400 gap-1.5"
+                data-testid="badge-channel-connecting"
+                title="Push kanalı açılıyor; ilk bağlantı kuruluyor."
+              >
+                <Loader2 className="h-3 w-3 animate-spin" /> Bağlanıyor
+              </Badge>
+            )}
+            {(workerMode === 'sse' || workerMode === 'auto') && running && !sseConnected && sseConsecutiveFailures > 0 && (
+              <Badge
+                variant="outline"
+                className="border-amber-500/40 text-amber-400 gap-1.5"
+                data-testid="badge-channel-reconnecting"
+                title={`Push bağlantısı koptu, ${sseConsecutiveFailures}. kez yeniden deneniyor. Tarama yedeği işleri kaçırmıyor.`}
+              >
+                <RefreshCw className="h-3 w-3 animate-spin" /> Yeniden bağlanıyor
+              </Badge>
+            )}
+            {workerMode === 'auto' && running && !sseConnected && sseConsecutiveFailures === 0 && sseReconnectCount > 0 && (
+              <Badge
+                variant="outline"
+                className="border-muted-foreground/40 text-muted-foreground gap-1.5"
+                data-testid="badge-channel-fallback"
+                title="Push kapalı; tarama yedeği aktif. Bağlantı geri geldiğinde otomatik geçilir."
+              >
+                <ZapOff className="h-3 w-3" /> Tarama yedeğine düştü
+              </Badge>
+            )}
           </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2 border-t border-border/30">
@@ -197,6 +259,45 @@ export default function WorkerStatusPage() {
             </p>
           </div>
         </div>
+        {/* SSE channel detail row — visible only when SSE/auto mode is in use.
+            Adds last-event freshness + reconnect count without crowding the
+            top badge area. Operator-grade detail; pure poll users don't see it. */}
+        {(workerMode === 'sse' || workerMode === 'auto') && (
+          <div
+            className="grid grid-cols-2 md:grid-cols-3 gap-3 pt-2 border-t border-border/30"
+            data-testid="row-sse-detail"
+          >
+            <div>
+              <p className="text-[10px] uppercase text-muted-foreground">Kanal modu</p>
+              <p className="text-sm">
+                {workerMode === 'sse' && 'SSE (yalnız push)'}
+                {workerMode === 'auto' && 'Otomatik (push + tarama yedeği)'}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase text-muted-foreground">Son canlı olay</p>
+              <p className="text-sm flex items-center gap-1" data-testid="text-sse-last-event">
+                <Clock className="h-3 w-3 text-muted-foreground" />
+                {sseLastEventAt ? relTime(sseLastEventAt) : 'Henüz olay yok'}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase text-muted-foreground">Yeniden bağlanma</p>
+              <p className="text-sm" data-testid="text-sse-reconnect-count">
+                {sseReconnectCount === 0 ? (
+                  <span className="text-muted-foreground">Hiç olmadı</span>
+                ) : (
+                  <span className={sseReconnectCount > 3 ? 'text-amber-400' : 'text-foreground'}>
+                    {sseReconnectCount} kez
+                    {sseConsecutiveFailures > 0 && (
+                      <span className="text-amber-400"> ({sseConsecutiveFailures} ardışık)</span>
+                    )}
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+        )}
         {status?.last_error && (
           <div className="text-xs bg-rose-500/10 border border-rose-500/30 rounded px-3 py-2 text-rose-300 font-mono break-all">
             {status.last_error}

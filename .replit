@@ -54,3 +54,7 @@ externalPort = 80
 deploymentTarget = "autoscale"
 run = ["bash", "start_frontend.sh"]
 build = ["bash", "-c", "cd frontend && npm install --legacy-peer-deps && npm run build"]
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 120000
