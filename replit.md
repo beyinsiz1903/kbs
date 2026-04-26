@@ -200,6 +200,11 @@ uv run pytest tests/ -q
     sayılır. Operatör panelinde "X sessiz / Y hata" rozeti — kök sebep teşhisi
     (flaky link mi, gerçekten bozuk PMS mi). `sse_reconnect_count` rollup
     olarak kalır (UI geriye dönük uyumlu).
+  - ✅ Global bağlantı kopma uyarısı (`frontend/src/contexts/WorkerStatusContext.js`):
+    Toast + beep + sekme başlığı (`(!) Bağlantı koptu — KBS Bridge`) artık
+    `AppShell` seviyesinde tek polling'den (5s) sürülüyor. Önceden sadece
+    WorkerStatusPage mount iken çalışıyordu, /ayarlar açıkken kopma sessizdi.
+    Provider unmount → başlık restore.
   - ⏳ **Bekleniyor (PMS ekibi):** `/api/kbs/queue/stream` endpoint'inin canlı PMS'te yayına alınması.
     Ajan tarafı hazır; sözleşme: `event: new_job\ndata: {"job_id":"...","tenant_id":"..."}`,
     `Authorization: Bearer <token>`, opsiyonel `Last-Event-ID` resume, `event: heartbeat` keep-alive.
