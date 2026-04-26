@@ -1,8 +1,20 @@
-"""Thin HTTP client to the hotel's Syroce PMS.
+"""Thin async HTTP client to the hotel's Syroce PMS (KBS Agent contract v1).
 
-The PMS exposes a REST API. This module only proxies — no business logic.
+This module ONLY proxies. No business logic, no retries (worker decides retries
+based on the typed exceptions / PMSError status codes raised here).
+
+Endpoints used:
+    POST /api/auth/login        — login with hotel_id + email + password
+    GET  /api/auth/me           — current user / tenant info
+    GET  /api/kbs/queue         — list queue jobs
+    POST /api/kbs/queue/{id}/claim    — atomic claim (409 if taken)
+    POST /api/kbs/queue/{id}/complete — mark done with kbs_reference
+    POST /api/kbs/queue/{id}/fail     — mark fail (PMS decides retry vs dead)
 """
+from __future__ import annotations
+
 import os
+from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -10,11 +22,13 @@ from fastapi import HTTPException
 
 
 class PMSError(HTTPException):
-    pass
+    """HTTP error from the PMS surface, with the same shape as FastAPI's HTTPException."""
 
 
 # Hosts the user must NEVER set as their PMS URL — would cause request loops
 _FORBIDDEN_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+DEFAULT_TIMEOUT = httpx.Timeout(connect=8.0, read=15.0, write=10.0, pool=5.0)
 
 
 def _validate_pms_url(pms_url: str) -> None:
@@ -30,7 +44,6 @@ def _validate_pms_url(pms_url: str) -> None:
             status_code=400,
             detail="PMS URL bu bilgisayara isaret ediyor. Otelinizin gercek Syroce PMS adresini girin.",
         )
-    # Detect "PMS URL is this app's own URL" → infinite loop
     own_host = os.environ.get("PUBLIC_HOSTNAME", "").lower()
     if own_host and host == own_host:
         raise PMSError(
@@ -48,26 +61,38 @@ def _translate_error(resp: httpx.Response) -> PMSError:
     return PMSError(status_code=resp.status_code, detail=detail)
 
 
-async def login(pms_url: str, email: str, password: str) -> dict:
-    """POST {PMS_URL}/api/auth/login → {access_token, token_type, user}"""
-    _validate_pms_url(pms_url)
-    url = pms_url.rstrip("/") + "/api/auth/login"
-    timeout = httpx.Timeout(connect=8.0, read=15.0, write=10.0, pool=5.0)
+def _wrap_request_error(e: httpx.RequestError) -> PMSError:
+    if isinstance(e, httpx.TimeoutException):
+        return PMSError(
+            status_code=504,
+            detail="PMS yanit vermedi (zaman asimi). PMS adresini kontrol edin.",
+        )
+    return PMSError(
+        status_code=503,
+        detail=f"PMS'e ulasilamiyor: {e.__class__.__name__}",
+    )
+
+
+# ---------- Internal helpers ----------
+
+def _auth_headers(token: str, idem_key: Optional[str] = None) -> dict:
+    h = {"Authorization": f"Bearer {token}"}
+    if idem_key:
+        h["Idempotency-Key"] = idem_key
+    return h
+
+
+async def _request(method: str, url: str, *, headers: dict, json_body: Optional[dict] = None,
+                   params: Optional[dict] = None, timeout: httpx.Timeout = DEFAULT_TIMEOUT) -> dict:
     async with httpx.AsyncClient(timeout=timeout, verify=True, follow_redirects=False) as client:
         try:
-            resp = await client.post(url, json={"email": email, "password": password})
-        except httpx.TimeoutException as e:
-            raise PMSError(
-                status_code=504,
-                detail="PMS yanit vermedi (zaman asimi). PMS adresini kontrol edin.",
-            ) from e
+            resp = await client.request(method, url, headers=headers, json=json_body, params=params)
         except httpx.RequestError as e:
-            raise PMSError(
-                status_code=503,
-                detail=f"PMS'e ulasilamiyor: {e.__class__.__name__}",
-            ) from e
+            raise _wrap_request_error(e) from e
     if resp.status_code >= 400:
         raise _translate_error(resp)
+    if resp.status_code == 204 or not resp.content:
+        return {}
     try:
         return resp.json()
     except ValueError:
@@ -77,62 +102,99 @@ async def login(pms_url: str, email: str, password: str) -> dict:
         )
 
 
-async def _authed_get(pms_url: str, token: str, path: str, params: dict | None = None) -> dict:
-    url = pms_url.rstrip("/") + path
-    async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
-        try:
-            resp = await client.get(
-                url,
-                params=params,
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        except httpx.RequestError as e:
-            raise PMSError(
-                status_code=503,
-                detail=f"PMS'e ulasilamiyor: {e.__class__.__name__}",
-            ) from e
-    if resp.status_code >= 400:
-        raise _translate_error(resp)
-    return resp.json()
+# ---------- Auth ----------
 
+async def login(pms_url: str, hotel_id: str, email: str, password: str) -> dict:
+    """POST {PMS_URL}/api/auth/login → {access_token, token_type, user}.
 
-async def _authed_post(pms_url: str, token: str, path: str, body: dict) -> dict:
-    url = pms_url.rstrip("/") + path
-    async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
-        try:
-            resp = await client.post(
-                url,
-                json=body,
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        except httpx.RequestError as e:
-            raise PMSError(
-                status_code=503,
-                detail=f"PMS'e ulasilamiyor: {e.__class__.__name__}",
-            ) from e
-    if resp.status_code >= 400:
-        raise _translate_error(resp)
-    return resp.json()
+    `hotel_id` is REQUIRED by the v1 KBS Agent contract.
+    """
+    _validate_pms_url(pms_url)
+    if not hotel_id:
+        raise PMSError(status_code=400, detail="hotel_id zorunludur")
+    url = pms_url.rstrip("/") + "/api/auth/login"
+    body = {"hotel_id": hotel_id, "email": email, "password": password}
+    return await _request("POST", url, headers={}, json_body=body)
 
 
 async def get_me(pms_url: str, token: str) -> dict:
-    return await _authed_get(pms_url, token, "/api/kbs/me")
+    """GET {PMS_URL}/api/auth/me → {id, email, tenant_id, role, ...}."""
+    url = pms_url.rstrip("/") + "/api/auth/me"
+    return await _request("GET", url, headers=_auth_headers(token))
 
 
-async def get_guests(pms_url: str, token: str, date: str) -> dict:
-    return await _authed_get(pms_url, token, "/api/kbs/guests", params={"date": date})
+# ---------- KBS Queue (v1) ----------
+
+async def list_queue(
+    pms_url: str,
+    token: str,
+    status: Optional[str] = None,
+    limit: int = 20,
+    date_from: Optional[str] = None,
+) -> dict:
+    """GET {PMS_URL}/api/kbs/queue?status=&limit=&date_from=
+
+    Returns: {jobs: [...], total: N, stats: {pending, in_progress, done, failed, dead}}
+    `status` may be a single value or comma-separated.
+    """
+    url = pms_url.rstrip("/") + "/api/kbs/queue"
+    params: dict = {"limit": limit}
+    if status:
+        params["status"] = status
+    if date_from:
+        params["date_from"] = date_from
+    return await _request("GET", url, headers=_auth_headers(token), params=params)
 
 
-async def post_report(pms_url: str, token: str, body: dict) -> dict:
-    return await _authed_post(pms_url, token, "/api/kbs/report", body)
+async def claim_job(
+    pms_url: str,
+    token: str,
+    job_id: str,
+    worker_id: str,
+    lease_seconds: int = 300,
+    idem_key: Optional[str] = None,
+) -> dict:
+    """POST {PMS_URL}/api/kbs/queue/{id}/claim → {job: {...}}.
+
+    Raises PMSError(409) if another worker holds the lease, PMSError(404) if missing.
+    """
+    url = pms_url.rstrip("/") + f"/api/kbs/queue/{job_id}/claim"
+    body = {"worker_id": worker_id, "lease_seconds": lease_seconds}
+    return await _request("POST", url, headers=_auth_headers(token, idem_key), json_body=body)
 
 
-async def get_reports(pms_url: str, token: str, date_from: str, date_to: str) -> dict:
-    return await _authed_get(
-        pms_url, token, "/api/kbs/reports",
-        params={"date_from": date_from, "date_to": date_to},
-    )
+async def complete_job(
+    pms_url: str,
+    token: str,
+    job_id: str,
+    worker_id: str,
+    kbs_reference: str,
+    notes: str = "",
+    idem_key: Optional[str] = None,
+) -> dict:
+    """POST {PMS_URL}/api/kbs/queue/{id}/complete → {job, report_id}.
+
+    Raises PMSError(403) if worker_id mismatch, PMSError(409) if already closed.
+    """
+    url = pms_url.rstrip("/") + f"/api/kbs/queue/{job_id}/complete"
+    body = {"worker_id": worker_id, "kbs_reference": kbs_reference, "notes": notes}
+    return await _request("POST", url, headers=_auth_headers(token, idem_key), json_body=body)
 
 
-async def get_report_detail(pms_url: str, token: str, report_id: str) -> dict:
-    return await _authed_get(pms_url, token, f"/api/kbs/reports/{report_id}")
+async def fail_job(
+    pms_url: str,
+    token: str,
+    job_id: str,
+    worker_id: str,
+    error: str,
+    retry: bool,
+    idem_key: Optional[str] = None,
+) -> dict:
+    """POST {PMS_URL}/api/kbs/queue/{id}/fail → {job, will_retry, next_retry_at}.
+
+    PMS decides whether the job is retried (with backoff) or marked dead.
+    `error` is truncated to 2000 chars to match the contract.
+    """
+    url = pms_url.rstrip("/") + f"/api/kbs/queue/{job_id}/fail"
+    body = {"worker_id": worker_id, "error": (error or "")[:2000], "retry": bool(retry)}
+    return await _request("POST", url, headers=_auth_headers(token, idem_key), json_body=body)

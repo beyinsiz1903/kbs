@@ -1,36 +1,29 @@
-"""KBS Bridge backend.
+"""KBS Agent backend (Phase A — autonomous polling worker).
 
-Thin proxy between the local KBS thin-client UI and:
-  1) the hotel's Syroce PMS (REST API)
-  2) the EGM/Jandarma KBS web service (SOAP/XML)
+This server runs alongside an asyncio polling worker. The worker pulls jobs from
+the hotel's Syroce PMS KBS queue and reports results back. The HTTP surface
+exists only to:
+  - configure the agent (PMS URL + KBS settings)
+  - hold the operator's PMS session (encrypted on disk)
+  - expose the worker's status to a small UI
 
-Session state lives in a Fernet-encrypted file under /data — see session.py.
-This server has NO database. The PMS is the source of truth.
+There is no "send to KBS" button anymore — submissions are autonomous.
 """
-import json
+from __future__ import annotations
+
 import logging
 import os
-import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
-from kbs_client import KBSConfigError, submit as kbs_submit
-from pms_client import (
-    PMSError,
-    get_guests as pms_get_guests,
-    get_me as pms_get_me,
-    get_report_detail as pms_get_report_detail,
-    get_reports as pms_get_reports,
-    login as pms_login,
-    post_report as pms_post_report,
-)
+import worker
+from pms_client import PMSError, get_me as pms_get_me, login as pms_login
 from session import (
-    DATA_DIR,
     clear_session,
     load_session,
     load_settings,
@@ -42,9 +35,8 @@ from session import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 log = logging.getLogger("kbs-bridge")
 
-app = FastAPI(title="KBS Bridge", version="2.1.0")
+app = FastAPI(title="Syroce KBS Agent", version="3.0.0")
 
-# Default to the local frontend only. Hotel deployments override via CORS_ORIGINS.
 _default_origins = "http://localhost:5000,http://127.0.0.1:5000"
 _origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", _default_origins).split(",") if o.strip()]
 app.add_middleware(
@@ -67,16 +59,11 @@ class SettingsIn(BaseModel):
 
 
 class LoginIn(BaseModel):
+    hotel_id: str = Field(min_length=1, max_length=64)
     email: str
     password: str
     pms_url: str
     remember_me: bool = False
-
-
-class ReportIn(BaseModel):
-    date: str
-    booking_ids: list[str] = Field(min_length=1)
-    notes: str = ""
 
 
 # ---------- Helpers ----------
@@ -93,8 +80,8 @@ def require_session() -> dict:
     return sess
 
 
-def require_csrf(x_kbs_client: Optional[str] = Header(default=None)):
-    """Block cross-site requests: requires custom header which triggers CORS preflight.
+def require_csrf(x_kbs_client: Optional[str] = Header(default=None)) -> None:
+    """CSRF protection: requires our custom header which forces CORS preflight.
 
     Browsers won't send X-KBS-Client cross-origin without a successful preflight,
     and our CORS config only allows the local frontend origin. This protects
@@ -104,56 +91,45 @@ def require_csrf(x_kbs_client: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=403, detail="Gecersiz istemci")
 
 
-def _kbs_config_from_session(sess: dict) -> dict:
-    return {
-        "tesis_kodu": sess.get("kbs_tesis_kodu", ""),
-        "kullanici_adi": sess.get("kbs_kullanici_adi", ""),
-        "sifre": sess.get("kbs_sifre", ""),
-        "servis_url": sess.get("kbs_servis_url", ""),
-    }
+# ---------- Lifecycle ----------
+
+@app.on_event("startup")
+async def _startup() -> None:
+    worker.start()
 
 
-# ---------- Submission journal (durable record before PMS ack) ----------
-
-JOURNAL_FILE = DATA_DIR / "submissions.jsonl"
-
-
-def _journal_append(entry: dict) -> None:
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with JOURNAL_FILE.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError as e:
-        log.warning("Submission journal write failed: %s", e)
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await worker.stop()
 
 
 # ---------- Health / settings ----------
 
 @app.get("/api/health")
-async def health():
+async def health() -> dict:
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/settings")
-async def get_settings():
+async def get_settings() -> dict:
     """Plaintext settings (PMS URL only). KBS credentials live in session."""
     settings = load_settings()
     sess = load_session()
     return {
         "pms_url": settings.get("pms_url", ""),
+        "hotel_id": settings.get("hotel_id", ""),
         "kbs_configured": bool(sess and _kbs_is_configured(sess)),
     }
 
 
 @app.post("/api/settings", dependencies=[Depends(require_csrf)])
-async def update_settings(payload: SettingsIn):
+async def update_settings(payload: SettingsIn) -> dict:
     """Save the PMS URL (plaintext) and update KBS creds in the active session."""
-    save_settings({"pms_url": payload.pms_url})
+    save_settings({**load_settings(), "pms_url": payload.pms_url})
     sess = load_session()
     if sess is not None:
         sess["kbs_tesis_kodu"] = payload.kbs_tesis_kodu or ""
         sess["kbs_kullanici_adi"] = payload.kbs_kullanici_adi or ""
-        # None or empty → preserve existing password (frontend leaves blank)
         if payload.kbs_sifre:
             sess["kbs_sifre"] = payload.kbs_sifre
         sess["kbs_servis_url"] = payload.kbs_servis_url or ""
@@ -165,8 +141,9 @@ async def update_settings(payload: SettingsIn):
 # ---------- Auth ----------
 
 @app.post("/api/auth/login", dependencies=[Depends(require_csrf)])
-async def login(payload: LoginIn):
-    pms_resp = await pms_login(payload.pms_url, payload.email, payload.password)
+async def login(payload: LoginIn) -> dict:
+    """Login through the PMS. Stores the access_token + tenant info in the local session."""
+    pms_resp = await pms_login(payload.pms_url, payload.hotel_id, payload.email, payload.password)
     access_token = pms_resp.get("access_token")
     if not access_token:
         raise HTTPException(status_code=502, detail="PMS access_token donmedi")
@@ -175,9 +152,14 @@ async def login(payload: LoginIn):
 
     # Preserve existing KBS creds across logins
     prev = load_session() or {}
-    save_settings({"pms_url": payload.pms_url})
+    save_settings({
+        **load_settings(),
+        "pms_url": payload.pms_url,
+        "hotel_id": payload.hotel_id,
+    })
     save_session({
         "pms_url": payload.pms_url,
+        "hotel_id": payload.hotel_id,
         "access_token": access_token,
         "user": me,
         "remember_me": payload.remember_me,
@@ -186,132 +168,46 @@ async def login(payload: LoginIn):
         "kbs_sifre": prev.get("kbs_sifre", ""),
         "kbs_servis_url": prev.get("kbs_servis_url", ""),
     })
+    # Wake worker so it picks up the new session immediately
+    worker.trigger_poll_now()
     return {"user": me}
 
 
 @app.get("/api/auth/me")
-async def me(sess: dict = Depends(require_session)):
+async def me(sess: dict = Depends(require_session)) -> dict:
     return {
         "user": sess["user"],
         "pms_url": sess["pms_url"],
+        "hotel_id": sess.get("hotel_id", ""),
         "kbs_configured": _kbs_is_configured(sess),
     }
 
 
 @app.post("/api/auth/logout", dependencies=[Depends(require_csrf)])
-async def logout():
+async def logout() -> dict:
     clear_session()
     return {"ok": True}
 
 
-# ---------- KBS data flow ----------
+# ---------- Worker status ----------
 
-@app.get("/api/guests")
-async def list_guests(date: str, sess: dict = Depends(require_session), _csrf: None = Depends(require_csrf)):
-    return await pms_get_guests(sess["pms_url"], sess["access_token"], date)
-
-
-@app.post("/api/kbs/submit", dependencies=[Depends(require_csrf)])
-async def submit_to_kbs(payload: ReportIn, sess: dict = Depends(require_session)):
-    """1) Pull selected guests from PMS, 2) send to KBS, 3) report back to PMS.
-
-    A durable journal entry is written BEFORE the PMS ack so that if the ack
-    fails, the operator can still see the KBS reference and reconcile manually.
-    """
-    pms_url = sess["pms_url"]
-    token = sess["access_token"]
-
-    pms_data = await pms_get_guests(pms_url, token, payload.date)
-    selected = [g for g in pms_data.get("guests", []) if g.get("id") in payload.booking_ids]
-
-    if not selected:
-        raise HTTPException(status_code=404, detail="Secili misafir bulunamadi")
-
-    not_ready = [g["id"] for g in selected if not g.get("kbs_ready")]
-    if not_ready:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Eksik bilgili misafirler gonderilemez: {', '.join(not_ready)}",
-        )
-
-    validated_ids = [g["id"] for g in selected]
-
-    try:
-        kbs_result = kbs_submit(selected, _kbs_config_from_session(sess), payload.notes)
-    except KBSConfigError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
-    except Exception as e:
-        log.exception("KBS gonderimi basarisiz")
-        raise HTTPException(status_code=502, detail=f"KBS hatasi: {e}")
-
-    # Persist BEFORE attempting PMS ack so we can reconcile on failure
-    _journal_append({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "user": sess.get("user", {}).get("email"),
-        "date": payload.date,
-        "booking_ids": validated_ids,
-        "submission_reference": kbs_result["submission_reference"],
-        "mode": kbs_result["mode"],
-        "pms_acked": False,
-    })
-
-    # Acknowledge PMS using ONLY validated IDs (not raw client input)
-    try:
-        pms_ack = await pms_post_report(pms_url, token, {
-            "date": payload.date,
-            "booking_ids": validated_ids,
-            "notes": payload.notes,
-            "submission_reference": kbs_result["submission_reference"],
-        })
-    except Exception as e:
-        log.exception("PMS ack basarisiz, KBS gonderimi yapildi")
-        _journal_append({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "submission_reference": kbs_result["submission_reference"],
-            "pms_ack_error": str(e),
-        })
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"KBS gonderimi yapildi (Ref: {kbs_result['submission_reference']}) "
-                f"ancak PMS isaretlenemedi: {e}. "
-                "Lutfen PMS'te elle isaretleyin veya yeniden deneyin."
-            ),
-        )
-
-    _journal_append({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "submission_reference": kbs_result["submission_reference"],
-        "pms_acked": True,
-    })
-
-    return {
-        "submission_reference": kbs_result["submission_reference"],
-        "submitted_at": kbs_result["submitted_at"],
-        "guest_count": kbs_result["guest_count"],
-        "mode": kbs_result["mode"],
-        "booking_ids": validated_ids,
-        "pms_ack": pms_ack,
-    }
+@app.get("/api/worker/status")
+async def worker_status() -> dict:
+    """Snapshot of the polling worker for the UI."""
+    return worker.get_state().to_dict()
 
 
-@app.get("/api/reports")
-async def list_reports(date_from: str, date_to: str, sess: dict = Depends(require_session), _csrf: None = Depends(require_csrf)):
-    return await pms_get_reports(sess["pms_url"], sess["access_token"], date_from, date_to)
-
-
-@app.get("/api/reports/{report_id}")
-async def report_detail(report_id: str, sess: dict = Depends(require_session), _csrf: None = Depends(require_csrf)):
-    return await pms_get_report_detail(sess["pms_url"], sess["access_token"], report_id)
+@app.post("/api/worker/poll-now", dependencies=[Depends(require_csrf)])
+async def worker_poll_now() -> dict:
+    """Wake the worker now instead of waiting for the next poll tick."""
+    triggered = worker.trigger_poll_now()
+    return {"triggered": triggered}
 
 
 # ---------- Error wrapping ----------
 
 @app.exception_handler(PMSError)
-async def pms_error_handler(request: Request, exc: PMSError):
+async def pms_error_handler(request: Request, exc: PMSError) -> JSONResponse:
     if exc.status_code == 401:
         clear_session()
-    from fastapi.responses import JSONResponse
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
