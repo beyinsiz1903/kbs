@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 import worker
-from pms_client import PMSError, get_me as pms_get_me, login as pms_login
+from pms_client import PMSError, _validate_pms_url, get_me as pms_get_me, login as pms_login
 from session import (
     clear_session,
     load_session,
@@ -125,6 +125,9 @@ async def get_settings() -> dict:
 @app.post("/api/settings", dependencies=[Depends(require_csrf)])
 async def update_settings(payload: SettingsIn) -> dict:
     """Save the PMS URL (plaintext) and update KBS creds in the active session."""
+    # Reject loopback/self-host before persisting — otherwise the worker would
+    # later try to call back into this process.
+    _validate_pms_url(payload.pms_url)
     save_settings({**load_settings(), "pms_url": payload.pms_url})
     sess = load_session()
     if sess is not None:

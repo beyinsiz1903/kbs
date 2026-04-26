@@ -4,8 +4,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AppShell } from './components/AppShell';
 import { Toaster } from './components/ui/sonner';
 import LoginPage from './pages/LoginPage';
-import GuestsPage from './pages/GuestsPage';
-import ReportsPage from './pages/ReportsPage';
+import WorkerStatusPage from './pages/WorkerStatusPage';
 import SettingsPage from './pages/SettingsPage';
 import './App.css';
 
@@ -32,8 +31,7 @@ function AppRoutes() {
   return (
     <AppShell>
       <Routes>
-        <Route path="/" element={<GuestsPage />} />
-        <Route path="/raporlar" element={<ReportsPage />} />
+        <Route path="/" element={<WorkerStatusPage />} />
         <Route path="/ayarlar" element={<SettingsPage />} />
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

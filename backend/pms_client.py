@@ -84,6 +84,9 @@ def _auth_headers(token: str, idem_key: Optional[str] = None) -> dict:
 
 async def _request(method: str, url: str, *, headers: dict, json_body: Optional[dict] = None,
                    params: Optional[dict] = None, timeout: httpx.Timeout = DEFAULT_TIMEOUT) -> dict:
+    # Defense in depth: every outbound call re-validates the host so a poisoned
+    # session/settings store cannot redirect the worker to loopback or self.
+    _validate_pms_url(url)
     async with httpx.AsyncClient(timeout=timeout, verify=True, follow_redirects=False) as client:
         try:
             resp = await client.request(method, url, headers=headers, json=json_body, params=params)

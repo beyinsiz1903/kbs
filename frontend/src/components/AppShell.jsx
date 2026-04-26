@@ -3,10 +3,10 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { Users, FileText, Settings, LogOut, Radio, AlertTriangle } from 'lucide-react';
+import { Activity, Settings, LogOut, Radio, AlertTriangle } from 'lucide-react';
 
 export function AppShell({ children }) {
-  const { user, logout, kbsConfigured, pmsUrl } = useAuth();
+  const { user, logout, kbsConfigured, pmsUrl, hotelId } = useAuth();
   const navigate = useNavigate();
 
   const handleLogout = async () => {
@@ -15,11 +15,10 @@ export function AppShell({ children }) {
   };
 
   const fullName = user?.full_name || user?.email || '';
-  const tenantId = user?.tenant_id || '';
+  const tenantId = user?.tenant_id || hotelId || '';
 
   const navItems = [
-    { path: '/', icon: Users, label: 'Bugünün Misafirleri' },
-    { path: '/raporlar', icon: FileText, label: 'Rapor Geçmişi' },
+    { path: '/', icon: Activity, label: 'Worker Durumu' },
     { path: '/ayarlar', icon: Settings, label: 'Ayarlar' },
   ];
 
@@ -33,7 +32,7 @@ export function AppShell({ children }) {
             </div>
             <div>
               <h1 className="text-sm font-semibold tracking-tight">KBS Bridge</h1>
-              <p className="text-[10px] text-muted-foreground">Konaklama Bildirim Sistemi</p>
+              <p className="text-[10px] text-muted-foreground">Konaklama Bildirim Ajani</p>
             </div>
           </div>
 

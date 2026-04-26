@@ -40,14 +40,8 @@ export const login = (data) => api.post('/auth/login', data).then((r) => r.data)
 export const me = () => api.get('/auth/me').then((r) => r.data);
 export const logout = () => api.post('/auth/logout').then((r) => r.data);
 
-// ----- Guests / KBS -----
-export const listGuests = (date) =>
-  api.get('/guests', { params: { date } }).then((r) => r.data);
-export const submitToKbs = (payload) =>
-  api.post('/kbs/submit', payload).then((r) => r.data);
-export const listReports = (date_from, date_to) =>
-  api.get('/reports', { params: { date_from, date_to } }).then((r) => r.data);
-export const getReportDetail = (id) =>
-  api.get(`/reports/${id}`).then((r) => r.data);
+// ----- Worker -----
+export const getWorkerStatus = () => api.get('/worker/status').then((r) => r.data);
+export const triggerWorkerPoll = () => api.post('/worker/poll-now').then((r) => r.data);
 
 export default api;

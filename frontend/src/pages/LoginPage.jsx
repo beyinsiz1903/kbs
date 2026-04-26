@@ -12,6 +12,7 @@ import { Radio, LogIn, Eye, EyeOff } from 'lucide-react';
 export default function LoginPage() {
   const { login } = useAuth();
   const [pmsUrl, setPmsUrl] = useState('');
+  const [hotelId, setHotelId] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
@@ -22,20 +23,22 @@ export default function LoginPage() {
     getSettings()
       .then((s) => {
         if (s.pms_url) setPmsUrl(s.pms_url);
+        if (s.hotel_id) setHotelId(s.hotel_id);
       })
       .catch(() => {});
   }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!pmsUrl || !email || !password) {
-      toast.error('PMS adresi, e-posta ve şifre zorunludur');
+    if (!pmsUrl || !hotelId || !email || !password) {
+      toast.error('PMS adresi, otel kodu, e-posta ve şifre zorunludur');
       return;
     }
     setLoading(true);
     try {
       await login({
         pms_url: pmsUrl.trim(),
+        hotel_id: hotelId.trim(),
         email: email.trim(),
         password,
         remember_me: rememberMe,
@@ -57,8 +60,8 @@ export default function LoginPage() {
               <Radio className="h-5 w-5 text-primary" />
             </div>
             <div>
-              <CardTitle className="text-lg">KBS Bridge</CardTitle>
-              <CardDescription className="text-xs">Konaklama Bildirim Sistemi</CardDescription>
+              <CardTitle className="text-lg">KBS Bridge Agent</CardTitle>
+              <CardDescription className="text-xs">Otomatik konaklama bildirim ajani</CardDescription>
             </div>
           </div>
         </CardHeader>
@@ -76,6 +79,22 @@ export default function LoginPage() {
               />
               <p className="text-[10px] text-muted-foreground">
                 Otel yönetiminizin PMS adresi. Bir kere girince hatırlanır.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="hotel_id">Otel Kodu (hotel_id)</Label>
+              <Input
+                id="hotel_id"
+                type="text"
+                placeholder="kbs-test"
+                value={hotelId}
+                onChange={(e) => setHotelId(e.target.value)}
+                autoComplete="organization"
+                data-testid="input-hotel-id"
+              />
+              <p className="text-[10px] text-muted-foreground">
+                PMS'te otelinizi tanimlayan kisa kod. Yoneticinizden ogrenin.
               </p>
             </div>
 

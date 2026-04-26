@@ -1,9 +1,11 @@
-# KBS Bridge — PMS Bağlantılı KBS İnce İstemcisi
+# KBS Bridge — Otonom KBS Bildirim Ajanı (Syroce KBS Agent v1)
 
-Otelin resepsiyon bilgisayarında (Docker üzerinde) çalışan, **tek kullanıcılı** bir
-thin client. Otelci kendi PMS hesabıyla giriş yapar; uygulama PMS'ten misafirleri
-çeker, seçilenleri Emniyet/Jandarma KBS web servisine bildirir, sonra PMS'e geri
-"bildirildi" işareti basar.
+Otelin resepsiyon bilgisayarında (Docker üzerinde) çalışan, **tek operatörlü
+otonom ajan**. Operatör bir kez PMS hesabıyla giriş yapar; ajan arkada 7/24
+PMS'in KBS kuyruğunu (`/api/kbs/queue`) yoklar, bekleyen işleri claim eder,
+KBS web servisine (Phase A: simülasyon, Phase B: gerçek SOAP) gönderir,
+sonucu PMS'e geri raporlar. Operatör butonla tetiklemez — yalnızca durumu
+izler ve ayarları yönetir.
 
 ## Mimari Özet
 
@@ -11,48 +13,64 @@ thin client. Otelci kendi PMS hesabıyla giriş yapar; uygulama PMS'ten misafirl
 ┌─────────────────────────────────────────────────────────────────┐
 │  Otelin Bilgisayarı (Docker Compose)                            │
 │                                                                  │
-│   Tarayıcı (5000) ──▶  React UI                                 │
+│   Tarayıcı (5000) ──▶  React UI (Worker Durumu + Ayarlar)       │
 │                          │                                       │
 │                          ▼                                       │
-│                       FastAPI (8000)                             │
-│                          │                                       │
-│                ┌─────────┼──────────┐                            │
-│                ▼         ▼          ▼                            │
-│          PMS Client   KBS Client   Session Store                 │
-│             │            │           │                           │
-│             │            │           ▼                           │
-│             │            │      /data/.session.enc (Fernet)      │
-│             │            │      /data/settings.json              │
+│                       FastAPI (8000) ──▶ asyncio Worker         │
+│                          │                  (her 15 sn poll)    │
+│                ┌─────────┼──────────┐       │                   │
+│                ▼         ▼          ▼       ▼                   │
+│          PMS Client   KBS Client   Session  worker_id           │
+│             │            │           │       │                  │
+│             │            │           ▼       ▼                  │
+│             │            │   /data/.session.enc   /data/worker_id│
 │             ▼            ▼                                       │
 └─────────────│────────────│───────────────────────────────────────┘
               ▼            ▼
          Syroce PMS   EGM/Jandarma KBS
-         (REST/JSON)  (SOAP/XML)
+         (REST/JSON,  (SOAP/XML,
+          v1 KBS       Phase B'de
+          Agent        gerçek bağlanır)
+          contract)
 ```
 
-**Veritabanı yok.** PMS tek doğru kaynak. Yerelde sadece şifrelenmiş session
-ve PMS URL ayarı tutulur.
+**Veritabanı yok.** PMS tek doğru kaynak; ajan stateless. Yerelde sadece
+şifrelenmiş session, PMS URL/hotel_id ayarı ve persistente `worker_id`.
 
-## Kullanıcı Akışı
+## Operatör Akışı
 
-1. **Settings** — PMS URL + KBS bilgileri (tesis kodu, kullanıcı, şifre, servis URL)
-2. **Login** — PMS e-posta + şifre + "Beni hatırla" → POST `{PMS_URL}/api/auth/login`
-3. **Bugünün Misafirleri** — GET `{PMS_URL}/api/kbs/guests?date=...`, seçim, KBS'ye gönder
-4. **KBS gönderim** — KBS'ye SOAP, sonra POST `{PMS_URL}/api/kbs/report` ile PMS'e işaret
-5. **Rapor Geçmişi** — GET `{PMS_URL}/api/kbs/reports?date_from&date_to`
+1. **Login** — PMS URL + `hotel_id` + e-posta + şifre → POST `{PMS_URL}/api/auth/login`.
+2. **Settings** — KBS bilgileri (tesis kodu, kullanıcı, şifre, servis URL) — Phase B
+   gerçek SOAP'a bağlanırken kullanılacak.
+3. **Worker Durumu** — Otomatik tarama her 15 sn. Operatör son turun zamanı,
+   son hata, kuyruk istatistikleri (pending/in_progress/done/failed/dead),
+   "claim/complete/fail" sayaçları ve son 20 işlem listesini görür.
+4. **Şimdi Tara** — Operatör erken tetikleme isteyebilir.
+
+## Worker Davranışı
+
+| Durum | Davranış |
+|---|---|
+| `next_retry_at` geçmemiş | İş atlanır, sonraki turda denenir |
+| Claim 409 | Başka ajan tutmuş, atla |
+| KBS başarılı | `complete(kbs_reference)` |
+| Timeout/5xx/network | `fail(retry=True)` — PMS exponential backoff verir |
+| 4xx (validasyon) | `fail(retry=False)` — PMS dead'e atar |
+| 429 | `fail(retry=True)` + uyarı log |
+| Beklenmeyen exception | `fail(retry=True)` + tam stack trace |
+| 401 | Oturum silinir, frontend login'e düşer |
 
 ## Güvenlik
 
-- **Session şifrelemesi:** Fernet (AES-128-CBC + HMAC). Anahtar `SESSION_ENCRYPTION_KEY`
-  ortam değişkeninden okunur, image'a gömülmez. Anahtar üretmek için:
-  ```bash
-  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-  ```
+- **PMS URL doğrulaması:** Her dış çağrıda `_validate_pms_url` çalışır;
+  loopback/self-host yasak (SSRF koruması).
+- **CSRF:** `X-KBS-Client: kbs-bridge` header zorunlu (CORS preflight forced).
+- **Session şifrelemesi:** Fernet (AES-128-CBC + HMAC). Anahtar
+  `SESSION_ENCRYPTION_KEY` ortam değişkeninden okunur, image'a gömülmez.
 - **Konum:** `/data/.session.enc` (mod 600), Docker volume'da kalıcı.
-- **Kapsam:** Token, PMS URL, kullanıcı bilgisi, **KBS şifresi** hepsi tek bir
-  şifrelenmiş dosyada.
-- **30 dk inactivity** → frontend timer + backend `last_active` kontrolü session'ı siler.
-- **Manuel çıkış:** Settings ve sidebar'da "Çıkış" butonları (`/data/.session.enc` silinir).
+- **Kapsam:** PMS token, hotel_id, kullanıcı bilgisi, **KBS şifresi** hepsi
+  tek şifrelenmiş dosyada.
+- **30 dk inactivity** → frontend timer + backend `last_active` kontrolü.
 - **TC/Pasaport** UI'da maskelenir, log dosyalarına yazılmaz.
 - **HTTPS:** PMS ve KBS çağrılarında `verify=True`.
 
@@ -60,48 +78,58 @@ ve PMS URL ayarı tutulur.
 
 | Dosya | Görev |
 |---|---|
-| `server.py` | FastAPI; route'lar: `/api/auth/*`, `/api/settings`, `/api/guests`, `/api/kbs/submit`, `/api/reports*` |
+| `server.py` | FastAPI; route'lar: `/api/auth/*`, `/api/settings`, `/api/worker/status`, `/api/worker/poll-now` |
+| `worker.py` | Otonom polling task (asyncio). FastAPI startup'ta başlar, shutdown'da temiz kapanır |
 | `session.py` | Fernet ile `/data/.session.enc` ve `/data/settings.json` yönetimi |
-| `pms_client.py` | Syroce PMS'e ince HTTP proxy (`httpx`, 30s timeout, retry yok) |
-| `kbs_client.py` | KBS web servisi göndericisi. **Şu an simülasyon** (`KBS_MODE=simulation`). Gerçek için `_send_real()` SOAP'ı doldurulacak |
+| `pms_client.py` | Syroce PMS v1 KBS Agent contract istemcisi (login, me, queue list/claim/complete/fail) |
+| `kbs_client.py` | KBS web servisi göndericisi. **Şu an simülasyon** (`KBS_MODE=simulation`); Phase B'de gerçek SOAP |
 
 ## Frontend Dosyaları (`frontend/src/`)
 
 | Dosya | Görev |
 |---|---|
-| `App.js` | 4 route: `/login`, `/`, `/raporlar`, `/ayarlar` |
+| `App.js` | 3 route: `/login`, `/`, `/ayarlar` |
 | `contexts/AuthContext.js` | Oturum durumu + 30 dk inactivity timer + 401 yakalayıcı |
 | `lib/api.js` | Axios kümeli, hata mesajı yardımcısı |
-| `components/AppShell.jsx` | Sol menü + üst bar, "Çıkış" butonu |
-| `pages/LoginPage.jsx` | PMS URL + e-posta + şifre + "Beni hatırla" |
+| `components/AppShell.jsx` | Sol menü (Worker Durumu + Ayarlar) + üst bar |
+| `pages/LoginPage.jsx` | PMS URL + **hotel_id** + e-posta + şifre |
+| `pages/WorkerStatusPage.jsx` | Worker canlı durumu, kuyruk istatistikleri, son işlemler, "şimdi tara" |
 | `pages/SettingsPage.jsx` | PMS URL + KBS dört alan + "Çıkış" butonu |
-| `pages/GuestsPage.jsx` | Tarih seç, tablo, çoklu seçim, "KBS'ye Gönder" |
-| `pages/ReportsPage.jsx` | Tarih aralığı, geçmiş raporlar tablosu |
 
-## Hata Yönetimi (Spec'teki kurallar)
+## Worker Identity
+
+- `<DATA_DIR>/worker_id` dosyasında kalıcı: `agent-<hostname>-<uuid4>`.
+- Restart'lar arası değişmez. Tek dosya, mod 600.
+- Aynı PMS'e birden fazla ajan bağlanırsa her biri kendi kimliğiyle claim atar
+  (Phase D'de daha sıkı koordinasyon).
+
+## Hata Yönetimi (PMS yanıtı)
 
 | HTTP | Davranış |
 |---|---|
-| 401 | Session silinir, login ekranına yönlendirilir |
-| 403 | "Yetkiniz yok" toast (PMS'in döndüğü `detail`) |
-| 404 | "Kayıt bulunamadı" |
-| 503 | "PMS'e ulaşılamıyor" |
-| diğer | PMS'in döndüğü Türkçe `detail` toast olarak gösterilir |
+| 401 | Session silinir, login ekranına yönlendirilir + worker `session=invalid` |
+| 403 | UI'da Türkçe `detail` toast |
+| 404/409 | Job artık yok / başka tarafından alınmış — atlanır |
+| 429 | retry=True + uyarı log |
+| 5xx / timeout / network | retry=True |
+| diğer 4xx | retry=False (dead) |
 
 ## Ortam Değişkenleri
 
 | Değişken | Zorunlu | Açıklama |
 |---|---|---|
 | `SESSION_ENCRYPTION_KEY` | ✅ | 32-byte base64 Fernet anahtarı |
-| `KBS_MODE` | hayır | `simulation` (varsayılan) veya `real` |
+| `KBS_MODE` | hayır | `simulation` (varsayılan) veya `real` (Phase B) |
 | `DATA_DIR` | hayır | Varsayılan `/data`, dev'de `./.devdata` |
-| `CORS_ORIGINS` | hayır | Varsayılan `*` |
+| `POLL_INTERVAL` | hayır | Saniye, varsayılan 15 |
+| `CORS_ORIGINS` | hayır | Varsayılan `http://localhost:5000` |
+| `PUBLIC_HOSTNAME` | hayır | Self-host engellemek için (opsiyonel) |
 
 ## Çalıştırma
 
-### Replit dev ortamı (mevcut workflow)
+### Replit dev ortamı (workflow `Start application`)
 `bash start_frontend.sh` — Fernet anahtarını `.devdata/.devkey` içinde otomatik
-üretir, backend'i 8000, frontend'i 5000'de başlatır.
+üretir, backend'i 8000, frontend'i 5000'de başlatır. Worker arkada otomatik döner.
 
 ### Üretim (otelin bilgisayarı, Docker)
 ```bash
@@ -110,18 +138,27 @@ docker compose up -d
 # → http://localhost:5000
 ```
 
-## Yapılacaklar
+### Testler
+```bash
+uv run pytest tests/ -q
+```
+26 test (pms_client mock httpx + worker davranış senaryoları).
 
-- [ ] **`kbs_client._send_real()` doldurulacak.** Emniyet/Jandarma KBS WSDL'i ve
-  XML şablonu kullanıcı tarafından sağlanınca. Şimdi `NotImplementedError` döner.
-- [ ] Üretimde `SESSION_ENCRYPTION_KEY`'i `.env` dosyasına alıp `docker-compose --env-file` ile vermek.
-- [ ] (İsteğe bağlı) Sertifikalı KBS endpoint'i için mTLS sertifikası volume mount.
+## Faz Planı
+
+- **Phase A (TAMAMLANDI):** Polling worker iskeleti, queue endpoint'leri,
+  hotel_id ile login, Worker Status UI, simülasyon KBS.
+- **Phase B (PENDING):** Gerçek EGM/Jandarma SOAP, Idempotency-Key kalıcılığı,
+  KBS sertifika/credential validation.
+- **Phase C (PENDING):** Windows packaging (PyInstaller), DPAPI, service mode.
+- **Phase D (PENDING):** Çoklu ajan koordinasyonu, opsiyonel SSE.
 
 ## Tasarım Kararları
 
-- **Çok kiracılı yapı silindi.** Her otel kendi PMS'i ile konuşur, kendi KBS
-  hesabıyla bildirim gönderir; merkezi bir admin paneline gerek yok.
-- **MongoDB silindi.** Hiçbir veri yerel olarak tutulmaz; PMS otoriter.
-- **JWT/şifre hash silindi.** Auth'u PMS yapıyor.
-- **DPAPI yerine Fernet.** Docker (Linux container) seçildiği için Windows
-  DPAPI kullanılamadı; pratikte eşdeğer (anahtar env'de, dosya mod 600, volume).
+- **Otonom ajan, manuel tetik yok.** Operatör butonla göndermez; PMS kuyruğu
+  doğru kaynak. UI sadece durum gösterir.
+- **PMS gerçeğin tek kaynağı.** Ajan stateless. Yerel disk yalnızca session +
+  worker_id tutar.
+- **Tek kullanıcı modeli.** Resepsiyon makinesi başına bir oturum.
+- **MongoDB / JWT / şifre hash silindi.** Auth'u PMS yapar; ajan token taşır.
+- **DPAPI yerine Fernet.** Linux container; Phase C'de Windows için DPAPI gelecek.

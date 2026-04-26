@@ -318,6 +318,31 @@ async def _poll_once(state: WorkerState) -> None:
             log.exception("Job islerken beklenmeyen hata: %s", job.get("id"))
 
 
+async def _sleep_until_event_or_timeout(
+    stop: asyncio.Event, poll_now: asyncio.Event, timeout: float
+) -> None:
+    """Wait up to `timeout` seconds, returning early on stop or poll_now.
+
+    Cancels and awaits the pending wait task so we don't leak it across
+    iterations (otherwise long uptimes accumulate orphaned coroutines).
+    Note: caller is responsible for clearing `poll_now` once consumed.
+    """
+    stop_task = asyncio.create_task(stop.wait())
+    poll_task = asyncio.create_task(poll_now.wait())
+    try:
+        await asyncio.wait(
+            {stop_task, poll_task},
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        for t in (stop_task, poll_task):
+            if not t.done():
+                t.cancel()
+        # Drain cancellations cleanly
+        await asyncio.gather(stop_task, poll_task, return_exceptions=True)
+
+
 async def _loop(state: WorkerState, stop: asyncio.Event, poll_now: asyncio.Event) -> None:
     log.info(
         "worker started: %s polling every %ds", state.worker_id, state.poll_interval
@@ -326,6 +351,8 @@ async def _loop(state: WorkerState, stop: asyncio.Event, poll_now: asyncio.Event
     state.running = True
     try:
         while not stop.is_set():
+            # Consume any prior poll-now trigger so it fires at most once per cycle.
+            poll_now.clear()
             try:
                 await _poll_once(state)
             except Exception:  # pragma: no cover - defensive
@@ -333,18 +360,7 @@ async def _loop(state: WorkerState, stop: asyncio.Event, poll_now: asyncio.Event
                 state.last_poll_ok = False
                 state.last_error = traceback.format_exc()[-500:]
 
-            poll_now.clear()
-            try:
-                await asyncio.wait_for(
-                    asyncio.wait(
-                        {asyncio.create_task(stop.wait()),
-                         asyncio.create_task(poll_now.wait())},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    ),
-                    timeout=state.poll_interval,
-                )
-            except asyncio.TimeoutError:
-                pass
+            await _sleep_until_event_or_timeout(stop, poll_now, state.poll_interval)
     finally:
         state.running = False
         log.info("worker stopped: %s", state.worker_id)
