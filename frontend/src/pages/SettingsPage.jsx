@@ -7,7 +7,9 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { toast } from 'sonner';
-import { Save, LogOut, Shield, Database } from 'lucide-react';
+import { Save, LogOut, Shield, Database, Bell } from 'lucide-react';
+import { Switch } from '../components/ui/switch';
+import { getAlertSoundEnabled, setAlertSoundEnabled } from '../lib/operatorPrefs';
 
 export default function SettingsPage() {
   const { logout, refreshKbsStatus } = useAuth();
@@ -20,6 +22,14 @@ export default function SettingsPage() {
   const [kbsKurum, setKbsKurum] = useState('');
   const [kbsConfigured, setKbsConfigured] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Task #13: operatör tercihleri (frontend-only, localStorage'da kalıcı).
+  const [alertSoundEnabled, setAlertSoundEnabledState] = useState(() => getAlertSoundEnabled());
+
+  const handleAlertSoundChange = (value) => {
+    setAlertSoundEnabledState(value);
+    setAlertSoundEnabled(value);
+    toast.success(value ? 'Sesli uyarı açıldı' : 'Sesli uyarı kapatıldı');
+  };
 
   useEffect(() => {
     getSettings()
@@ -185,6 +195,35 @@ export default function SettingsPage() {
             <p className="text-[10px] text-muted-foreground">
               Otelinizin bağlı olduğu kuruma göre seçin. Yanlış seçim raporun reddedilmesine yol açar.
             </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="bg-card/40 border-border/50">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Bell className="h-4 w-4 text-primary" />
+            <CardTitle className="text-base">Bildirim Tercihleri</CardTitle>
+          </div>
+          <CardDescription className="text-xs">
+            Bu bilgisayara özel arayüz tercihleri. Hesabınıza değil, bu tarayıcıya kayıtlıdır.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label htmlFor="alert-sound" className="text-sm">Sesli uyarı</Label>
+              <p className="text-[11px] text-muted-foreground max-w-md">
+                PMS push bağlantısı koptuğunda kısa bir bip sesi çalar. Kapatırsanız
+                yalnızca ekran uyarısı (toast) ve sekme başlığı değişimi kalır.
+              </p>
+            </div>
+            <Switch
+              id="alert-sound"
+              checked={alertSoundEnabled}
+              onCheckedChange={handleAlertSoundChange}
+              data-testid="switch-alert-sound"
+            />
           </div>
         </CardContent>
       </Card>

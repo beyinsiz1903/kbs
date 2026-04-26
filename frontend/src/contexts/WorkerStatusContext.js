@@ -8,6 +8,7 @@ import React, {
 } from 'react';
 import { toast } from 'sonner';
 import { getWorkerStatus, errorMessage } from '../lib/api';
+import { getAlertSoundEnabled } from '../lib/operatorPrefs';
 
 const WorkerStatusContext = createContext(null);
 
@@ -113,7 +114,11 @@ export function WorkerStatusProvider({ children }) {
         description: 'PMS push bağlantısı kesildi. Tarama yedeği işleri kaçırmıyor; yeniden bağlanmaya çalışılıyor.',
         duration: 10000,
       });
-      playAlertBeep();
+      // Task #13: operatör Ayarlar'dan sesli uyarıyı kapatabilir; toast +
+      // sekme başlığı uyarısı her durumda çalışır, beep tercih kapalıysa çalmaz.
+      if (getAlertSoundEnabled()) {
+        playAlertBeep();
+      }
       if (originalTitleRef.current === null) {
         originalTitleRef.current = document.title;
       }
