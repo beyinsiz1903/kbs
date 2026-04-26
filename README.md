@@ -119,7 +119,7 @@ bash start_frontend.sh
 
 # Test
 uv run pytest tests/ -q
-# 102 test
+# 116 test
 ```
 
 ### `WORKER_MODE` env (Phase D)

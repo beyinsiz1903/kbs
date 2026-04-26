@@ -146,7 +146,7 @@ docker compose up -d
 ```bash
 uv run pytest tests/ -q
 ```
-115 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op + Phase D: multi-agent atomik claim + SSE client/supervisor).
+116 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op + Phase D: multi-agent atomik claim + SSE client/supervisor).
 
 ## Faz Planı
 
