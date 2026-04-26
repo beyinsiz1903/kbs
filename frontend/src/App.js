@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { WorkerStatusProvider } from './contexts/WorkerStatusContext';
 import { AppShell } from './components/AppShell';
 import { Toaster } from './components/ui/sonner';
 import LoginPage from './pages/LoginPage';
@@ -29,14 +30,16 @@ function AppRoutes() {
   }
 
   return (
-    <AppShell>
-      <Routes>
-        <Route path="/" element={<WorkerStatusPage />} />
-        <Route path="/ayarlar" element={<SettingsPage />} />
-        <Route path="/login" element={<Navigate to="/" replace />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </AppShell>
+    <WorkerStatusProvider>
+      <AppShell>
+        <Routes>
+          <Route path="/" element={<WorkerStatusPage />} />
+          <Route path="/ayarlar" element={<SettingsPage />} />
+          <Route path="/login" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </AppShell>
+    </WorkerStatusProvider>
   );
 }
 

@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { getWorkerStatus, triggerWorkerPoll, errorMessage } from '../lib/api';
+import React, { useState } from 'react';
+import { triggerWorkerPoll, errorMessage } from '../lib/api';
+import { useWorkerStatus } from '../contexts/WorkerStatusContext';
 import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -8,8 +9,6 @@ import {
   RefreshCw, PlayCircle, CheckCircle2, AlertTriangle, XCircle,
   Activity, Wifi, WifiOff, Clock, Users, Radio, Satellite, ZapOff, Loader2,
 } from 'lucide-react';
-
-const REFRESH_MS = 5000;
 
 function fmtTime(s) {
   if (!s) return '—';
@@ -61,140 +60,12 @@ function OutcomeBadge({ outcome }) {
   return <Badge variant="outline">{outcome}</Badge>;
 }
 
-function playAlertBeep() {
-  try {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return;
-    const ctx = new Ctx();
-    if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
-      ctx.resume().catch(() => {});
-    }
-    const beepAt = (offset, freq) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      const start = ctx.currentTime + offset;
-      const dur = 0.18;
-      gain.gain.setValueAtTime(0.0001, start);
-      gain.gain.exponentialRampToValueAtTime(0.18, start + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(start);
-      osc.stop(start + dur + 0.02);
-    };
-    beepAt(0, 880);
-    beepAt(0.22, 660);
-    setTimeout(() => { try { ctx.close(); } catch { /* noop */ } }, 700);
-  } catch {
-    /* sound is best-effort; UI toast still fires */
-  }
-}
-
 export default function WorkerStatusPage() {
-  const [status, setStatus] = useState(null);
-  const [loading, setLoading] = useState(false);
+  // Task #12: status polling + SSE disconnect alerts now live in
+  // WorkerStatusProvider so operators get the warning on every page
+  // (Ayarlar dahil), not only when this page is mounted.
+  const { status, loading, refresh, refreshIntervalMs } = useWorkerStatus();
   const [polling, setPolling] = useState(false);
-  // Task #10: detect sse_connected transitions across REFRESH_MS polls so
-  // the operator gets an active toast/sound + tab-title flag on disconnect.
-  // - prevSseConnectedRef: last observed sse_connected (true/false/null=unseen)
-  // - alertedDisconnectRef: a disconnect toast is currently outstanding;
-  //   guards against repeat alerts during long outages and ensures the
-  //   "tekrar aktif" toast only fires after a real disconnect (not on the
-  //   very first connect of the page).
-  // - originalTitleRef: stored once, restored when reconnected / unmount.
-  const prevSseConnectedRef = useRef(null);
-  const alertedDisconnectRef = useRef(false);
-  const originalTitleRef = useRef(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await getWorkerStatus();
-      setStatus(res);
-    } catch (err) {
-      toast.error(errorMessage(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    load();
-    const t = setInterval(load, REFRESH_MS);
-    return () => clearInterval(t);
-  }, [load]);
-
-  // Task #10: SSE connect/disconnect transition alerts.
-  // Runs every time `status` is refreshed. We deliberately key on the whole
-  // `status` object (not just sseConnected) because we also need the latest
-  // worker_mode / running / sessionStatus to decide if push is even expected.
-  useEffect(() => {
-    if (!status) return;
-    const mode = status.worker_mode || 'poll';
-    const eligible =
-      (mode === 'sse' || mode === 'auto') &&
-      !!status.running &&
-      status.session_status === 'ok';
-
-    // If the worker is no longer in a push-eligible state (mode switched to
-    // poll, worker stopped, session dropped) any pending "disconnect" UI
-    // becomes stale — supervisor isn't expecting push anymore. Clear the
-    // alert latch and restore the tab title so the warning doesn't linger
-    // across navigations or mode changes.
-    if (!eligible) {
-      prevSseConnectedRef.current = null;
-      if (alertedDisconnectRef.current) {
-        alertedDisconnectRef.current = false;
-        if (originalTitleRef.current !== null) {
-          document.title = originalTitleRef.current;
-          originalTitleRef.current = null;
-        }
-      }
-      return;
-    }
-    const connected = !!status.sse_connected;
-    const prev = prevSseConnectedRef.current;
-    prevSseConnectedRef.current = connected;
-
-    // First sample after eligibility: just record, no toast.
-    if (prev === null) return;
-
-    if (prev === true && connected === false && !alertedDisconnectRef.current) {
-      alertedDisconnectRef.current = true;
-      toast.warning('Anlık bildirim kanalı koptu', {
-        description: 'PMS push bağlantısı kesildi. Tarama yedeği işleri kaçırmıyor; yeniden bağlanmaya çalışılıyor.',
-        duration: 10000,
-      });
-      playAlertBeep();
-      if (originalTitleRef.current === null) {
-        originalTitleRef.current = document.title;
-      }
-      document.title = '⚠ Bağlantı koptu — ' + (originalTitleRef.current || 'KBS');
-    } else if (connected === true && alertedDisconnectRef.current) {
-      alertedDisconnectRef.current = false;
-      toast.success('Anlık bildirim tekrar aktif', {
-        description: 'PMS push bağlantısı geri kuruldu.',
-        duration: 5000,
-      });
-      if (originalTitleRef.current !== null) {
-        document.title = originalTitleRef.current;
-        originalTitleRef.current = null;
-      }
-    }
-  }, [status]);
-
-  // Restore the original tab title if the page unmounts while a disconnect
-  // alert is still outstanding.
-  useEffect(() => {
-    return () => {
-      if (originalTitleRef.current !== null) {
-        document.title = originalTitleRef.current;
-        originalTitleRef.current = null;
-      }
-    };
-  }, []);
 
   const handlePollNow = async () => {
     setPolling(true);
@@ -202,7 +73,7 @@ export default function WorkerStatusPage() {
       const res = await triggerWorkerPoll();
       if (res.triggered) toast.success('Worker tetiklendi');
       else toast.error('Worker calismiyor');
-      setTimeout(load, 800);
+      setTimeout(() => { refresh(); }, 800);
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -231,13 +102,13 @@ export default function WorkerStatusPage() {
         <div>
           <h1 className="text-xl font-semibold">Worker Durumu</h1>
           <p className="text-xs text-muted-foreground">
-            Otomatik KBS bildirim ajaninin canli durumu (her {REFRESH_MS / 1000} sn yenilenir)
+            Otomatik KBS bildirim ajaninin canli durumu (her {refreshIntervalMs / 1000} sn yenilenir)
           </p>
         </div>
         <div className="flex items-end gap-2 flex-wrap">
           <Button
             variant="outline"
-            onClick={load}
+            onClick={refresh}
             disabled={loading}
             className="gap-2"
             data-testid="btn-refresh-status"
