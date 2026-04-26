@@ -212,7 +212,10 @@ async def _claim_then_process(
     retry: bool = True
 
     try:
-        kbs_reference = submit_guest(payload, config=None)
+        # submit_guest is sync (Phase A simulation uses time.sleep; Phase B will
+        # replace with httpx-async). Offload to a thread so the polling loop
+        # stays responsive — keeps poll-now and shutdown signals snappy.
+        kbs_reference = await asyncio.to_thread(submit_guest, payload, None)
     except KBSConfigError as e:
         # Genuine config error (e.g. Phase B not yet wired) → permanent
         error_msg = f"KBSConfigError: {e}"
