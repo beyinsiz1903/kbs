@@ -201,6 +201,124 @@ async def test_auto_mode_idles_after_three_failures(_isolated_data_dir, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_sse_silent_stream_triggers_heartbeat_watchdog(
+    _isolated_data_dir, monkeypatch,
+):
+    """A stream that connects but then sends NOTHING (no events, no
+    heartbeats) for SSE_HEARTBEAT_TIMEOUT seconds must be torn down and
+    reconnected. Without this, the supervisor would happily report
+    `sse_connected=true` for hours while operators silently fall back to
+    the 15s poll loop and lose the push advantage.
+    """
+    monkeypatch.setenv("WORKER_MODE", "sse")
+    import worker
+
+    # Tiny timeout so the test runs in milliseconds, not minutes. The
+    # supervisor reads the module global at call time, so monkeypatching
+    # `worker.SSE_HEARTBEAT_TIMEOUT` is sufficient.
+    monkeypatch.setattr(worker, "SSE_HEARTBEAT_TIMEOUT", 0.05)
+
+    sleeps: list[float] = []
+
+    async def fast_sleep(stop_arg, t):
+        sleeps.append(t)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(worker, "_sleep_with_stop", fast_sleep)
+
+    _save_session()
+    state = worker.get_state()
+
+    attempts = {"n": 0}
+    stop = asyncio.Event()
+    poll_now = asyncio.Event()
+
+    @asynccontextmanager
+    async def silent_stream(pms_url, token, *, last_event_id=None):
+        attempts["n"] += 1
+
+        async def gen():
+            # Open the stream but never emit anything — simulates a NAT/proxy
+            # that holds the TCP socket open but swallows server events.
+            await asyncio.sleep(60)
+            yield  # pragma: no cover - unreachable
+
+        yield gen()
+
+    sup = asyncio.create_task(
+        worker._sse_supervisor(state, stop, poll_now, open_stream=silent_stream)
+    )
+
+    # Wait for at least 2 silent-disconnect cycles so we can prove the
+    # watchdog is repeatable, not a one-shot.
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if state.sse_reconnect_count >= 2 and attempts["n"] >= 2:
+            break
+
+    stop.set()
+    await asyncio.gather(sup, return_exceptions=True)
+
+    assert attempts["n"] >= 2, (
+        f"watchdog should force reconnect; got only {attempts['n']} attempt(s)"
+    )
+    assert state.sse_reconnect_count >= 2, (
+        f"sse_reconnect_count should increment on each silent disconnect, "
+        f"got {state.sse_reconnect_count}"
+    )
+    assert state.sse_connected is False
+
+
+@pytest.mark.asyncio
+async def test_sse_heartbeat_resets_watchdog(_isolated_data_dir, monkeypatch):
+    """A stream that DOES send periodic heartbeats (faster than the watchdog
+    timeout) must NOT be considered silent — the watchdog only fires on
+    actual silence."""
+    monkeypatch.setenv("WORKER_MODE", "sse")
+    import worker
+
+    monkeypatch.setattr(worker, "SSE_HEARTBEAT_TIMEOUT", 0.2)
+
+    _save_session()
+    state = worker.get_state()
+
+    stop = asyncio.Event()
+    poll_now = asyncio.Event()
+    beats = {"n": 0}
+
+    @asynccontextmanager
+    async def beating_stream(pms_url, token, *, last_event_id=None):
+        async def gen():
+            # Emit heartbeats faster than the watchdog timeout. If the
+            # watchdog incorrectly counted heartbeats as silence, the
+            # stream would tear down before we reach the target count.
+            for _ in range(10):
+                await asyncio.sleep(0.02)
+                beats["n"] += 1
+                yield _ev("heartbeat", "{}")
+            await stop.wait()
+
+        yield gen()
+
+    sup = asyncio.create_task(
+        worker._sse_supervisor(state, stop, poll_now, open_stream=beating_stream)
+    )
+
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if beats["n"] >= 5:
+            break
+
+    assert beats["n"] >= 5
+    assert state.sse_connected is True
+    assert state.sse_reconnect_count == 0
+    assert state.sse_last_event_at is not None
+
+    stop.set()
+    await asyncio.gather(sup, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_sse_supervisor_waits_when_no_session(_isolated_data_dir, monkeypatch):
     """No session → supervisor must idle politely without opening the stream."""
     monkeypatch.setenv("WORKER_MODE", "sse")

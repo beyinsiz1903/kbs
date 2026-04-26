@@ -126,6 +126,7 @@ izler ve ayarları yönetir.
 | `DATA_DIR` | hayır | Varsayılan `/data`, dev'de `./.devdata` |
 | `POLL_INTERVAL` | hayır | Saniye, varsayılan 15 |
 | `WORKER_MODE` | hayır | `poll` (varsayılan) / `sse` / `auto`. `sse` ve `auto` PMS'in `/api/kbs/queue/stream` SSE endpoint'ine bağlanır; her `new_job` event'inde polling tetiklenir. `auto` 3 ardışık SSE başarısızlığında poll'a düşer |
+| `SSE_HEARTBEAT_TIMEOUT` | hayır | Saniye, varsayılan 60. SSE supervisor'ın "sessiz stream" watchdog eşiği — bu süre boyunca event/heartbeat gelmezse stream kopuk sayılır ve reconnect tetiklenir |
 | `CORS_ORIGINS` | hayır | Varsayılan `http://localhost:5000` |
 | `PUBLIC_HOSTNAME` | hayır | Self-host engellemek için (opsiyonel) |
 
@@ -146,7 +147,7 @@ docker compose up -d
 ```bash
 uv run pytest tests/ -q
 ```
-116 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op + Phase D: multi-agent atomik claim + SSE client/supervisor).
+118 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op + Phase D: multi-agent atomik claim + SSE client/supervisor + heartbeat watchdog).
 
 ## Faz Planı
 
@@ -189,6 +190,10 @@ uv run pytest tests/ -q
     event'i `poll_now`'u tetikler — claim/idem/journal akışı poll'la birebir aynı
     kalır. Reconnect 1s→2s→4s→8s→16s→30s exp backoff. `auto` 3 ardışık başarısızlıkta
     60s idle'a düşer (poll loop yedek). 401/403 → oturum temizlenir.
+  - ✅ SSE heartbeat watchdog (`SSE_HEARTBEAT_TIMEOUT`, varsayılan 60s):
+    `asyncio.wait_for` ile her event arası max bekleme; PMS sessiz kalırsa
+    (NAT idle, proxy buffering, sunucu stall) stream kopuk sayılıp reconnect
+    tetiklenir. `sse_reconnect_count` artar, "yarı canlı" durum erken yakalanır.
   - ⏳ **Bekleniyor (PMS ekibi):** `/api/kbs/queue/stream` endpoint'inin canlı PMS'te yayına alınması.
     Ajan tarafı hazır; sözleşme: `event: new_job\ndata: {"job_id":"...","tenant_id":"..."}`,
     `Authorization: Bearer <token>`, opsiyonel `Last-Event-ID` resume, `event: heartbeat` keep-alive.

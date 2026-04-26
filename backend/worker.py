@@ -651,6 +651,19 @@ SSE_BACKOFF_MAX = 30.0
 SSE_AUTO_FAILURE_THRESHOLD = 3
 SSE_AUTO_RETRY_INTERVAL = 60.0
 
+# Heartbeat watchdog: if no event (including server-side `heartbeat`/`ping`)
+# arrives within this many seconds, the supervisor considers the stream
+# "silently dead" — the TCP socket is still open but nothing is flowing
+# (NAT idle timeout, proxy buffering, server-side stall) — and forces a
+# reconnect. Without this, the supervisor would happily report
+# `sse_connected=true` for hours while operators silently fall back to the
+# 15s poll cadence and lose the push advantage.
+#
+# The PMS contract guarantees at least one heartbeat per 30s, so 60s is a
+# generous floor that won't false-trip on a momentarily slow link. Override
+# via `SSE_HEARTBEAT_TIMEOUT` env var (seconds); tests use a tiny value.
+SSE_HEARTBEAT_TIMEOUT = float(os.environ.get("SSE_HEARTBEAT_TIMEOUT", "60"))
+
 
 async def _sse_supervisor(
     state: WorkerState, stop: asyncio.Event, poll_now: asyncio.Event,
@@ -694,8 +707,28 @@ async def _sse_supervisor(
                     state.sse_consecutive_failures = 0
                     backoff = SSE_BACKOFF_INITIAL
                     log.info("SSE connected to %s", pms_url)
-                    async for ev in events:
-                        if stop.is_set():
+                    # We can't use `async for` here because we need a per-event
+                    # heartbeat watchdog: if the PMS stops sending ANYTHING
+                    # (including its keep-alive heartbeat) for SSE_HEARTBEAT_TIMEOUT
+                    # seconds, the stream is effectively dead even though the
+                    # TCP socket is still up. Driving __anext__() through
+                    # asyncio.wait_for lets us treat that silence as a
+                    # disconnect and trigger the normal reconnect+backoff path.
+                    events_iter = events.__aiter__()
+                    while not stop.is_set():
+                        try:
+                            ev = await asyncio.wait_for(
+                                events_iter.__anext__(),
+                                timeout=SSE_HEARTBEAT_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError:
+                            log.warning(
+                                "SSE %ss boyunca event/heartbeat gelmedi — "
+                                "stream sessiz, reconnect tetikleniyor",
+                                int(SSE_HEARTBEAT_TIMEOUT),
+                            )
+                            break
+                        except StopAsyncIteration:
                             break
                         state.sse_last_event_at = datetime.now(timezone.utc).isoformat()
                         if ev.id:
