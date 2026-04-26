@@ -37,7 +37,12 @@ log = logging.getLogger("kbs-bridge")
 
 app = FastAPI(title="Syroce KBS Agent", version="3.0.0")
 
-_default_origins = "http://localhost:5000,http://127.0.0.1:5000"
+_default_origins = (
+    # Phase A/B dev (CRA on 5000, FastAPI on 8000)
+    "http://localhost:5000,http://127.0.0.1:5000,"
+    # Phase C single-port loopback bind (8765)
+    "http://localhost:8765,http://127.0.0.1:8765"
+)
 _origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", _default_origins).split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,

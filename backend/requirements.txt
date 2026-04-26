@@ -5,5 +5,13 @@ httpx==0.28.1
 cryptography==46.0.5
 starlette==0.37.2
 python-dotenv==1.2.1
+zeep==4.3.2
+requests==2.33.1
 pytest==8.3.3
 pytest-asyncio==0.24.0
+
+# ---- Windows-only (Phase C: tray + DPAPI + service + packaging) ----
+pywin32==311; sys_platform == 'win32'
+pystray==0.19.5; sys_platform == 'win32'
+Pillow==11.0.0; sys_platform == 'win32'
+pyinstaller==6.11.1; sys_platform == 'win32'

@@ -45,6 +45,7 @@ from pms_client import (
 )
 import idem
 import journal
+import eventlog
 from session import DATA_DIR, clear_session, load_session
 
 log = logging.getLogger("kbs-bridge.worker")
@@ -319,8 +320,9 @@ async def _claim_then_process(
         will_retry = bool((fail_resp or {}).get("will_retry", retry))
         journal.append("fail_ack", job_id=job_id, will_retry=will_retry)
         if not will_retry:
-            # PMS marked the job dead — release idem keys.
+            # PMS marked the job dead — release idem keys + alert IT via Event Log.
             idem.cleanup(job_id)
+            eventlog.warn_dead_job(job_id, error=error_msg)
     except PMSError as e:
         if e.status_code == 401:
             raise
@@ -392,6 +394,7 @@ async def _replay_unacked(pms_url: str, token: str, worker_id: str, state: Worke
                     state.fail_count += 1
                     if not (fr or {}).get("will_retry", want_retry):
                         idem.cleanup(jid)
+                        eventlog.warn_dead_job(jid, error=err)
                     state.record_recent(jid, "replay-fail",
                                          "retry" if want_retry else "dead", err[:200])
                 except PMSError as e:

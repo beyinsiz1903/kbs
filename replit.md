@@ -144,7 +144,7 @@ docker compose up -d
 ```bash
 uv run pytest tests/ -q
 ```
-51 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards).
+68 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op).
 
 ## Faz Planı
 
@@ -164,7 +164,22 @@ uv run pytest tests/ -q
   - ✅ `zeep` + `requests` bağımlılıkları eklendi.
   - ⏳ **Bekleniyor (Emniyet/Jandarma):** WSDL URL/dosyası, mTLS sertifikası (.pfx veya cert/key),
     test endpoint. Gelince `kbs_client._send_real()` doldurulup canlıya alınır.
-- **Phase C (PENDING):** Windows packaging (PyInstaller), DPAPI, service mode.
+- **Phase C (TAMAMLANDI — Linux'ta yazıldı, Windows'ta sınanmalı):**
+  - ✅ `backend/secure_storage.py` — Windows DPAPI / Linux Fernet fallback. Session.py Fernet'i kaldırıldı.
+  - ✅ `backend/log_setup.py` — RotatingFileHandler (10 MB × 5) + PII maskeleme filter
+    (TC, pasaport, doğum tarihi, ad/soyad/şifre alanları → `***`). Job ID maskelenmez.
+  - ✅ `backend/eventlog.py` — Windows Event Log writer (Application kanalı).
+    Dead-letter olan her iş için Event ID 1001 WARNING. Linux'ta sessiz no-op.
+  - ✅ `backend/single_instance.py` — Windows mutex / Linux flock. İkinci instance exit(2).
+  - ✅ `backend/tray.py` — `pystray` + `Pillow` ile sistem tepsisi (Durum/Ayarlar/Loglar/Çık).
+  - ✅ `backend/service.py` — `pywin32 ServiceFramework` ile NT servisi
+    (install/start/stop/remove/debug komutları).
+  - ✅ `backend/app_runtime.py` — Loopback bind sertleştirme (`HOST=0.0.0.0` reddedilir).
+  - ✅ `backend/__main__.py` — `MODE=server|tray|service` switch.
+  - ✅ `installer/SyroceKBSAgent.spec` (PyInstaller) + `installer/installer.iss` (Inno Setup).
+  - ✅ `requirements.txt` — Windows-only deps `; sys_platform == 'win32'` marker'ı ile.
+  - ✅ Sızdırılmış `.devdata/.devkey` git'ten temizlendi; README'ye rotasyon uyarısı.
+  - ⏳ Gerçek `.exe` build + Windows servis testi otelci PC'sinde yapılmalı (Replit'te imkansız).
 - **Phase D (PENDING):** Çoklu ajan koordinasyonu, opsiyonel SSE.
 
 ## Tasarım Kararları
@@ -175,4 +190,5 @@ uv run pytest tests/ -q
   worker_id tutar.
 - **Tek kullanıcı modeli.** Resepsiyon makinesi başına bir oturum.
 - **MongoDB / JWT / şifre hash silindi.** Auth'u PMS yapar; ajan token taşır.
-- **DPAPI yerine Fernet.** Linux container; Phase C'de Windows için DPAPI gelecek.
+- **DPAPI yerine Fernet (yalnızca Linux dev).** `backend/secure_storage.py` Windows'ta DPAPI
+  kullanır; Linux'ta `SESSION_ENCRYPTION_KEY` ile Fernet'e düşer.
