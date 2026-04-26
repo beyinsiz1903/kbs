@@ -219,6 +219,11 @@ export default function WorkerStatusPage() {
   const sseLastEventAt = status?.sse_last_event_at || null;
   const sseReconnectCount = status?.sse_reconnect_count || 0;
   const sseConsecutiveFailures = status?.sse?.consecutive_failures || 0;
+  // Task #11: cause-of-drop split. Operator needs to see "12 sessiz / 2 hata"
+  // to triage flaky-link vs actually-broken-PMS. Optional chaining keeps the
+  // page rendering on older backends that don't expose these yet.
+  const sseSilentDrops = status?.sse?.silent_drops || 0;
+  const sseErrorDrops = status?.sse?.error_drops || 0;
 
   return (
     <div className="space-y-4">
@@ -407,6 +412,21 @@ export default function WorkerStatusPage() {
                   </span>
                 )}
               </p>
+              {(sseSilentDrops > 0 || sseErrorDrops > 0) && (
+                <p
+                  className="text-[11px] mt-0.5 text-muted-foreground"
+                  data-testid="text-sse-drop-breakdown"
+                  title="Sessiz: stream uzun süre veri göndermedi (NAT, proxy, sunucu sessizliği). Hata: bağlantı reddedildi veya akış protokol hatası verdi."
+                >
+                  <span className={sseSilentDrops > 0 ? 'text-sky-400' : ''}>
+                    {sseSilentDrops} sessiz
+                  </span>
+                  <span> / </span>
+                  <span className={sseErrorDrops > 0 ? 'text-rose-400' : ''}>
+                    {sseErrorDrops} hata
+                  </span>
+                </p>
+              )}
             </div>
           </div>
         )}

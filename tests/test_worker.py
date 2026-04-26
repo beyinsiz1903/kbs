@@ -31,6 +31,9 @@ async def test_state_to_dict_shape(_isolated_data_dir):
     assert "sse_reconnect_count" in s and s["sse_reconnect_count"] == 0
     assert "sse" in s and set(s["sse"].keys()) == {
         "connected", "last_event_at", "reconnect_count", "consecutive_failures",
+        # Task #11: cause-of-drop split. Treated as part of the contract so a
+        # future drop here is caught (UI relies on these names).
+        "silent_drops", "error_drops",
     }
     # Flat and nested views must agree.
     assert s["sse_connected"] == s["sse"]["connected"]

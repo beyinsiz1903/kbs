@@ -170,6 +170,15 @@ class WorkerState:
         self.sse_last_event_at: Optional[str] = None
         self.sse_reconnect_count: int = 0
         self.sse_consecutive_failures: int = 0
+        # Phase D follow-up (#11): split the reconnect counter into two
+        # diagnostic categories so the operator can distinguish a flaky
+        # network (NAT idle / proxy buffering / silent stream → handled by
+        # the heartbeat watchdog from #9) from a genuinely broken upstream
+        # (connect refused, mid-stream protocol errors). `sse_reconnect_count`
+        # remains the rollup so existing UI keeps working; the two new
+        # fields are additive ("12 sessiz / 2 hata" view).
+        self.sse_silent_drops: int = 0
+        self.sse_error_drops: int = 0
 
     def record_recent(self, job_id: str, action: str, outcome: str, detail: str = "") -> None:
         self.recent_jobs.insert(0, {
@@ -216,6 +225,14 @@ class WorkerState:
                 "last_event_at": self.sse_last_event_at,
                 "reconnect_count": self.sse_reconnect_count,
                 "consecutive_failures": self.sse_consecutive_failures,
+                # Task #11: cause-of-drop breakdown. silent_drops counts
+                # heartbeat-watchdog timeouts and clean server-side EOFs
+                # (the stream went quiet); error_drops counts real
+                # exceptions (connect refused, RemoteProtocolError, etc.).
+                # silent + error == reconnect_count (post-connect drops
+                # only) plus any pre-connect failures captured in error.
+                "silent_drops": self.sse_silent_drops,
+                "error_drops": self.sse_error_drops,
             },
         }
 
@@ -701,6 +718,13 @@ async def _sse_supervisor(
                 await _sleep_with_stop(stop, 5.0)
                 continue
 
+            # Task #11: classify the cause of this iteration's drop so the
+            # operator can tell "stream went quiet" (silent — flaky link, NAT
+            # idle, proxy buffering) apart from "server actively errored"
+            # (error — PMS down, TLS bad, mid-stream protocol error). One
+            # iteration can only drop in one way; finally branches on this.
+            drop_reason: Optional[str] = None  # 'silent' | 'error' | None
+
             try:
                 async with open_stream(pms_url, token, last_event_id=last_event_id) as events:
                     state.sse_connected = True
@@ -722,13 +746,26 @@ async def _sse_supervisor(
                                 timeout=SSE_HEARTBEAT_TIMEOUT,
                             )
                         except asyncio.TimeoutError:
+                            drop_reason = 'silent'
                             log.warning(
                                 "SSE %ss boyunca event/heartbeat gelmedi — "
-                                "stream sessiz, reconnect tetikleniyor",
+                                "stream sessiz, reconnect tetikleniyor "
+                                "(silent toplam=%d, hata toplam=%d)",
                                 int(SSE_HEARTBEAT_TIMEOUT),
+                                state.sse_silent_drops + 1,
+                                state.sse_error_drops,
                             )
                             break
                         except StopAsyncIteration:
+                            # Server closed the stream cleanly with no error —
+                            # treat as silent (no exception, just EOF).
+                            drop_reason = 'silent'
+                            log.info(
+                                "SSE stream sunucu tarafindan kapatildi "
+                                "(silent toplam=%d, hata toplam=%d)",
+                                state.sse_silent_drops + 1,
+                                state.sse_error_drops,
+                            )
                             break
                         state.sse_last_event_at = datetime.now(timezone.utc).isoformat()
                         if ev.id:
@@ -755,21 +792,47 @@ async def _sse_supervisor(
                 clear_session()
                 state.session_status = "invalid"
                 state.last_error = "SSE 401/403: oturum gecersiz"
-                # Don't burn backoff on a missing session — the next loop
-                # iteration will hit the `not sess` branch and idle on 5s.
+                # Auth is neither silent nor a transient error — it's a config
+                # problem. Don't bump silent/error counters; don't burn backoff.
                 continue
             except asyncio.CancelledError:
                 raise
             except (sse_client.SSEConnectError, httpx.RequestError, Exception) as e:
                 # Mid-stream errors arrive here too (httpx.RemoteProtocolError,
-                # ReadError, ConnectionResetError). We never want the
-                # supervisor to die — log and back off.
-                log.warning("SSE baglanti koptu/hata: %s", e.__class__.__name__)
+                # ReadError, ConnectionResetError) — and connect-time errors
+                # (SSEConnectError) before we ever flipped sse_connected=True.
+                # We never want the supervisor to die — log and back off.
+                drop_reason = 'error'
+                log.warning(
+                    "SSE baglanti koptu/hata: %s "
+                    "(silent toplam=%d, hata toplam=%d)",
+                    e.__class__.__name__,
+                    state.sse_silent_drops,
+                    state.sse_error_drops + 1,
+                )
             finally:
+                # Only count toward reconnect_count if there was an actual
+                # drop this iteration. A clean shutdown (stop set while we
+                # held a live connection but never failed) shouldn't inflate
+                # the rollup — keeps it consistent with silent/error which
+                # also don't bump on clean shutdown.
                 if state.sse_connected:
                     state.sse_connected = False
-                    state.sse_reconnect_count += 1
+                    if drop_reason is not None:
+                        state.sse_reconnect_count += 1
+                # Update cause-split counters even for connect-time errors
+                # (we never went connected, so reconnect_count didn't bump,
+                # but the operator still needs to see the failed attempt).
+                if drop_reason == 'silent':
+                    state.sse_silent_drops += 1
+                elif drop_reason == 'error':
+                    state.sse_error_drops += 1
 
+            # Don't penalize a clean shutdown (stop set during inner loop with
+            # no actual drop) — only count toward auto-fallback if we really
+            # lost the stream this iteration.
+            if drop_reason is None:
+                continue
             state.sse_consecutive_failures += 1
             if (
                 state.worker_mode == "auto"

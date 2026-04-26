@@ -147,7 +147,7 @@ docker compose up -d
 ```bash
 uv run pytest tests/ -q
 ```
-118 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op + Phase D: multi-agent atomik claim + SSE client/supervisor + heartbeat watchdog).
+123 test (pms_client mock httpx + worker davranış senaryoları + idem + journal replay + real-mode guards + Phase C: secure_storage Fernet fallback + PII maskeleme + eventlog no-op + Phase D: multi-agent atomik claim + SSE client/supervisor + heartbeat watchdog + silent vs error drop classification).
 
 ## Faz Planı
 
@@ -194,6 +194,12 @@ uv run pytest tests/ -q
     `asyncio.wait_for` ile her event arası max bekleme; PMS sessiz kalırsa
     (NAT idle, proxy buffering, sunucu stall) stream kopuk sayılıp reconnect
     tetiklenir. `sse_reconnect_count` artar, "yarı canlı" durum erken yakalanır.
+  - ✅ SSE drop sebep ayrımı (`sse.silent_drops` vs `sse.error_drops`):
+    Watchdog timeout + temiz EOF "silent" sayılır (ağ/akış sessizliği);
+    `SSEConnectError`/`RemoteProtocolError`/diğer exception'lar "error"
+    sayılır. Operatör panelinde "X sessiz / Y hata" rozeti — kök sebep teşhisi
+    (flaky link mi, gerçekten bozuk PMS mi). `sse_reconnect_count` rollup
+    olarak kalır (UI geriye dönük uyumlu).
   - ⏳ **Bekleniyor (PMS ekibi):** `/api/kbs/queue/stream` endpoint'inin canlı PMS'te yayına alınması.
     Ajan tarafı hazır; sözleşme: `event: new_job\ndata: {"job_id":"...","tenant_id":"..."}`,
     `Authorization: Bearer <token>`, opsiyonel `Last-Event-ID` resume, `event: heartbeat` keep-alive.
