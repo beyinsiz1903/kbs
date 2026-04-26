@@ -117,7 +117,7 @@ export default function WorkerStatusPage() {
             Otomatik KBS bildirim ajaninin canli durumu (her {REFRESH_MS / 1000} sn yenilenir)
           </p>
         </div>
-        <div className="flex items-end gap-2">
+        <div className="flex items-end gap-2 flex-wrap">
           <Button
             variant="outline"
             onClick={load}
