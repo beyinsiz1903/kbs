@@ -41,7 +41,7 @@ async def _stop(runner: web.AppRunner) -> None:
 
 
 @pytest.mark.asyncio
-async def test_open_stream_reads_new_job_event(_allow_loopback):
+async def test_open_stream_reads_job_available_event(_allow_loopback):
     captured_auth: list[str] = []
 
     async def handler(request: web.Request) -> web.StreamResponse:
@@ -52,7 +52,7 @@ async def test_open_stream_reads_new_job_event(_allow_loopback):
         })
         await resp.prepare(request)
         await resp.write(
-            b"event: new_job\n"
+            b"event: job.available\n"
             b'data: {"job_id": "j-1", "tenant_id": "h1"}\n'
             b"id: 1\n\n"
         )
@@ -67,7 +67,7 @@ async def test_open_stream_reads_new_job_event(_allow_loopback):
                 events.append(ev)
         assert captured_auth == ["Bearer tok-xyz"]
         assert len(events) == 1
-        assert events[0].event == "new_job"
+        assert events[0].event == "job.available"
         assert events[0].id == "1"
         assert sse_client.parse_event_data(events[0]) == {
             "job_id": "j-1", "tenant_id": "h1",
@@ -156,21 +156,21 @@ async def test_parse_event_data_handles_garbage(_allow_loopback):
     """Malformed data must not raise — supervisor relies on this."""
     class _Fake:
         data = "not json"
-        event = "new_job"
+        event = "job.available"
         id = None
 
     assert sse_client.parse_event_data(_Fake()) == {}
 
     class _Empty:
         data = ""
-        event = "new_job"
+        event = "job.available"
         id = None
 
     assert sse_client.parse_event_data(_Empty()) == {}
 
     class _ListPayload:
         data = "[1, 2, 3]"  # valid JSON but not a dict
-        event = "new_job"
+        event = "job.available"
         id = None
 
     assert sse_client.parse_event_data(_ListPayload()) == {}

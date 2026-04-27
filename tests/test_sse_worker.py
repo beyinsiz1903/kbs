@@ -3,7 +3,7 @@
 These tests exercise `_sse_supervisor` directly with a fake `open_stream`
 context manager so we don't depend on httpx-sse or aiohttp here. The
 supervisor is the part that:
-  - triggers `poll_now` on every `new_job` event
+  - triggers `poll_now` on every `job.available` event
   - reconnects with exponential backoff on disconnect
   - in `auto` mode, idles after 3 consecutive failures so the poll loop
     can carry the load
@@ -36,7 +36,7 @@ def _ev(event_type: str, data: str = "{}", id_: str | None = None) -> SimpleName
 
 @pytest.mark.asyncio
 async def test_sse_event_triggers_poll_now(_isolated_data_dir, monkeypatch):
-    """A `new_job` SSE event must set the poll_now event so the loop wakes."""
+    """A `job.available` SSE event must set the poll_now event so the loop wakes."""
     monkeypatch.setenv("WORKER_MODE", "sse")
     import worker
     _save_session()
@@ -47,7 +47,7 @@ async def test_sse_event_triggers_poll_now(_isolated_data_dir, monkeypatch):
     @asynccontextmanager
     async def fake_open_stream(pms_url, token, *, last_event_id=None):
         async def gen():
-            yield _ev("new_job", '{"job_id": "j-1"}', id_="1")
+            yield _ev("job.available", '{"job_id": "j-1"}', id_="1")
             # Keep the stream open until the test cancels us so the
             # supervisor doesn't tear down + reconnect mid-test.
             await stop.wait()

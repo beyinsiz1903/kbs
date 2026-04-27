@@ -771,7 +771,9 @@ async def _sse_supervisor(
                         if ev.id:
                             last_event_id = ev.id
                         ev_type = (ev.event or "message").lower()
-                        if ev_type == "new_job":
+                        if ev_type == "job.available":
+                            # PMS contract v1 (KBS_SSE_CONTRACT.md):
+                            # `job.available` is the canonical wake event.
                             # The actual claim/process flow runs in the poll
                             # loop — we just wake it up. This keeps idempotency,
                             # atomic claim semantics, and journal replay

@@ -125,7 +125,7 @@ izler ve ayarları yönetir.
 | `KBS_MODE` | hayır | `simulation` (varsayılan) veya `real` (Phase B) |
 | `DATA_DIR` | hayır | Varsayılan `/data`, dev'de `./.devdata` |
 | `POLL_INTERVAL` | hayır | Saniye, varsayılan 15 |
-| `WORKER_MODE` | hayır | `poll` (varsayılan) / `sse` / `auto`. `sse` ve `auto` PMS'in `/api/kbs/queue/stream` SSE endpoint'ine bağlanır; her `new_job` event'inde polling tetiklenir. `auto` 3 ardışık SSE başarısızlığında poll'a düşer |
+| `WORKER_MODE` | hayır | `poll` (varsayılan) / `sse` / `auto`. `sse` ve `auto` PMS'in `/api/kbs/queue/stream` SSE endpoint'ine bağlanır; her `job.available` event'inde polling tetiklenir. `auto` 3 ardışık SSE başarısızlığında poll'a düşer |
 | `SSE_HEARTBEAT_TIMEOUT` | hayır | Saniye, varsayılan 60. SSE supervisor'ın "sessiz stream" watchdog eşiği — bu süre boyunca event/heartbeat gelmezse stream kopuk sayılır ve reconnect tetiklenir |
 | `CORS_ORIGINS` | hayır | Varsayılan `http://localhost:5000` |
 | `PUBLIC_HOSTNAME` | hayır | Self-host engellemek için (opsiyonel) |
@@ -186,7 +186,7 @@ uv run pytest tests/ -q
 - **Phase D (PARÇALI):**
   - ✅ Çoklu ajan koordinasyonu (worker_id MAC slug + `other_workers` paneli + atomik claim testleri).
   - ✅ SSE push kanalı (`backend/sse_client.py` + `worker._sse_supervisor`):
-    `WORKER_MODE=sse|auto` ile `/api/kbs/queue/stream` dinlenir; her `new_job`
+    `WORKER_MODE=sse|auto` ile `/api/kbs/queue/stream` dinlenir; her `job.available`
     event'i `poll_now`'u tetikler — claim/idem/journal akışı poll'la birebir aynı
     kalır. Reconnect 1s→2s→4s→8s→16s→30s exp backoff. `auto` 3 ardışık başarısızlıkta
     60s idle'a düşer (poll loop yedek). 401/403 → oturum temizlenir.
@@ -211,7 +211,8 @@ uv run pytest tests/ -q
     (`switch-alert-sound`) anlık yansır; kapalıyken beep çalmaz, toast +
     sekme başlığı yine çalışır. Tarayıcıya bağlı tercih (PMS hesabına değil).
   - ⏳ **Bekleniyor (PMS ekibi):** `/api/kbs/queue/stream` endpoint'inin canlı PMS'te yayına alınması.
-    Ajan tarafı hazır; sözleşme: `event: new_job\ndata: {"job_id":"...","tenant_id":"..."}`,
+    Ajan tarafı hazır; sözleşme (KBS_SSE_CONTRACT.md v1):
+    `event: job.available\ndata: {"job_id":"...","tenant_id":"..."}`,
     `Authorization: Bearer <token>`, opsiyonel `Last-Event-ID` resume, `event: heartbeat` keep-alive.
 
 ## Tasarım Kararları

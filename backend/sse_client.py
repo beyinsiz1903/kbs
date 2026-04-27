@@ -3,18 +3,18 @@
 Phase D continuation: when the PMS exposes a Server-Sent Events stream the
 worker can react to new jobs in 1-2 seconds instead of waiting for the next
 15-second poll tick. The SSE stream is a *signal channel only* — every
-`new_job` event simply triggers an early poll. The actual claim/process flow
-stays identical to polling, so we keep idempotency, atomic claim semantics,
-and journal replay unchanged.
+`job.available` event simply triggers an early poll. The actual claim/process
+flow stays identical to polling, so we keep idempotency, atomic claim
+semantics, and journal replay unchanged.
 
-Contract (per Faz D follow-up task):
+Contract: see backend/docs/KBS_SSE_CONTRACT.md v1 (PMS repo).
     GET  {pms_url}/api/kbs/queue/stream
     Headers:
         Authorization: Bearer <access_token>
         Accept:        text/event-stream
         Last-Event-ID: <id>            (optional, for resume after disconnect)
     Events:
-        event: new_job
+        event: job.available
         data:  {"job_id": "...", "tenant_id": "..."}
 
         event: heartbeat              (server keep-alive; ignored)
